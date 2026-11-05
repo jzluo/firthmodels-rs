@@ -114,20 +114,12 @@ impl LogisticData {
     /// # Errors
     ///
     /// Returns `InvalidDimensions` for mismatched lengths or for fewer positive-weight rows than
-    /// parameters. Returns `InvalidInput` for out-of-range values or options, or when a class has
-    /// no positive-weight row. Returns a numerical error if a factorization fails at the starting
-    /// coefficients or while the solver computes a Newton step.
-    ///
-    /// At some evaluations, the fit checks the QR pivots of the positive-weight rows of the design.
-    /// The check scales each column to unit norm first. The fit returns `RankDeficient` or
-    /// `IllConditionedDesign` when the check fails. It returns the error even when the check fails
-    /// at a trial step. The design has `n` rows and `k` columns. `S` is the information scaled to a
-    /// unit diagonal. An unpenalized fit runs the check at its first evaluation if the pivoted
-    /// Cholesky factor of `S` has a pivot at most `2·sqrt(max(n, k)·eps)` times its largest pivot.
-    /// A penalized fit runs the check at any evaluation where the unpivoted Cholesky factorization
-    /// of the information fails or where the unpivoted factor of `S` has a pivot at most
-    /// `sqrt(max(n, k)·eps)`. When any other factorization fails at a trial step, the solver
-    /// rejects the step. The fit does not return that error.
+    /// parameters. Returns `InvalidInput` for out-of-range values or options, or when a class has no
+    /// positive-weight row. Returns `RankDeficient` or `IllConditionedDesign` when the fit finds that
+    /// the positive-weight rows of the design are numerically rank deficient or ill-conditioned. The
+    /// fit runs this check only when the information is close to singular. Returns a numerical error
+    /// if a factorization fails at the starting coefficients or while the solver computes a Newton
+    /// step.
     pub fn fit(
         &self,
         response: &[f64],

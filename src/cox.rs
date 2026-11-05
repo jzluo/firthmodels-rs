@@ -108,8 +108,7 @@ impl CoxData {
     /// combination of the columns is constant over the positive-weight rows. For example, a full
     /// set of indicator columns sums to one on every row. The partial likelihood does not depend on
     /// such a combination. Returns a numerical error if a factorization fails at the starting
-    /// coefficients or while the solver computes a Newton step. When a factorization fails at a
-    /// trial step, the solver rejects the step. The fit does not return that error.
+    /// coefficients or while the solver computes a Newton step.
     pub fn fit(
         &self,
         sample_weight: Option<&[f64]>,
