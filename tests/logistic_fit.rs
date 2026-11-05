@@ -10,7 +10,7 @@
 
 use firthmodels::{
     Error, FitStatus, InferenceStatus, LogisticData, LogisticOptions, MatrixView, NewtonOptions,
-    ProfileOptions, Tail, fit_logistic,
+    ProfileOptions, Tail,
 };
 
 #[path = "fixtures/logistic_separation.rs"]
@@ -40,15 +40,11 @@ fn assert_close(actual: &[f64], expected: &[f64], rtol: f64) {
 
 #[test]
 fn matches_brglm2_with_separation() {
-    let fit = fit_logistic(
-        features(),
-        true,
-        separation::Y,
-        None,
-        None,
-        LogisticOptions::default(),
-    )
-    .unwrap();
+    let fit = LogisticData::new(features(), true)
+        .unwrap()
+        .model(separation::Y)
+        .fit()
+        .unwrap();
 
     assert_eq!(fit.status(), FitStatus::Converged);
 
@@ -87,15 +83,12 @@ fn fit_two_column_design(x: &[f64], response: &[f64], penalty_weight: f64) -> Re
         penalty_weight,
         ..LogisticOptions::default()
     };
-    fit_logistic(
-        MatrixView::from_row_major(x, 4, 2).unwrap(),
-        false,
-        response,
-        None,
-        None,
-        options,
-    )
-    .map(|_| ())
+    LogisticData::new(MatrixView::from_row_major(x, 4, 2).unwrap(), false)
+        .unwrap()
+        .model(response)
+        .options(options)
+        .fit()
+        .map(|_| ())
 }
 
 fn near_collinear_design(delta: f64) -> [f64; 8] {
@@ -141,14 +134,12 @@ fn ill_conditioned_design_found_at_a_trial_step_is_rejected() {
     ];
     let offset = [-40.0, 0.0, 0.0, 0.0, 0.0, 0.0];
     let fit = |options| {
-        fit_logistic(
-            MatrixView::from_row_major(&x, 6, 2).unwrap(),
-            true,
-            &[1.0, 1.0, 1.0, 0.0, 1.0, 0.0],
-            None,
-            Some(&offset),
-            options,
-        )
+        LogisticData::new(MatrixView::from_row_major(&x, 6, 2).unwrap(), true)
+            .unwrap()
+            .model(&[1.0, 1.0, 1.0, 0.0, 1.0, 0.0])
+            .offset(&offset)
+            .options(options)
+            .fit()
     };
     // With a step limit of zero, every trial point is the starting point. This fit therefore fails
     // only if the evaluation at the starting point fails.
@@ -199,14 +190,10 @@ fn duplicate_columns_are_rank_deficient() {
     let x = [1.0; 8];
     let response = [0.0, 0.0, 1.0, 1.0];
     assert!(matches!(
-        fit_logistic(
-            MatrixView::from_row_major(&x, 4, 2).unwrap(),
-            false,
-            &response,
-            None,
-            None,
-            LogisticOptions::default(),
-        ),
+        LogisticData::new(MatrixView::from_row_major(&x, 4, 2).unwrap(), false)
+            .unwrap()
+            .model(&response)
+            .fit(),
         Err(Error::RankDeficient {
             rank: 1,
             required: 2
@@ -257,15 +244,12 @@ fn covariate_in_large_units_matches_the_rescaled_fit() {
             penalty_weight,
             ..LogisticOptions::default()
         };
-        let fit = fit_logistic(
-            MatrixView::from_row_major(&x, n, 2).unwrap(),
-            true,
-            &response,
-            None,
-            None,
-            options,
-        )
-        .unwrap();
+        let fit = LogisticData::new(MatrixView::from_row_major(&x, n, 2).unwrap(), true)
+            .unwrap()
+            .model(&response)
+            .options(options)
+            .fit()
+            .unwrap();
         assert_eq!(fit.status(), FitStatus::Converged);
         let mut parameters = fit.parameters().to_vec();
         parameters[0] *= scale;
@@ -283,14 +267,11 @@ fn zero_column_is_rank_deficient() {
             penalty_weight,
             ..LogisticOptions::default()
         };
-        let result = fit_logistic(
-            MatrixView::from_row_major(&[0.0; 4], 4, 1).unwrap(),
-            false,
-            &[0.0, 1.0, 0.0, 1.0],
-            None,
-            None,
-            options,
-        );
+        let result = LogisticData::new(MatrixView::from_row_major(&[0.0; 4], 4, 1).unwrap(), false)
+            .unwrap()
+            .model(&[0.0, 1.0, 0.0, 1.0])
+            .options(options)
+            .fit();
         assert!(
             matches!(
                 result,
@@ -314,14 +295,12 @@ fn zero_weight_rows_do_not_affect_design_conditioning() {
         ..LogisticOptions::default()
     };
 
-    let result = fit_logistic(
-        MatrixView::from_row_major(&features, 5, 1).unwrap(),
-        true,
-        &response,
-        Some(&sample_weight),
-        None,
-        options,
-    );
+    let result = LogisticData::new(MatrixView::from_row_major(&features, 5, 1).unwrap(), true)
+        .unwrap()
+        .model(&response)
+        .sample_weight(&sample_weight)
+        .options(options)
+        .fit();
     assert!(result.is_ok(), "got {result:?}");
 }
 
@@ -339,9 +318,12 @@ fn zero_weight_rows_do_not_supply_rank() {
 
     // Each fit checks the conditioning of the design with its own weights. The check in the
     // unweighted fit does not affect the check in the weighted fit.
-    assert!(data.fit(&response, None, None, options).is_ok());
+    assert!(data.model(&response).options(options).fit().is_ok());
     assert!(matches!(
-        data.fit(&response, Some(&sample_weight), None, options),
+        data.model(&response)
+            .sample_weight(&sample_weight)
+            .options(options)
+            .fit(),
         Err(Error::RankDeficient {
             rank: 1,
             required: 2
@@ -356,7 +338,12 @@ fn penalty_weight_zero_matches_statsmodels_logit() {
         penalty_weight: 0.0,
         ..LogisticOptions::default()
     };
-    let fit = fit_logistic(x, true, unpenalized::Y, None, None, options).unwrap();
+    let fit = LogisticData::new(x, true)
+        .unwrap()
+        .model(unpenalized::Y)
+        .options(options)
+        .fit()
+        .unwrap();
 
     assert_eq!(fit.status(), FitStatus::Converged);
 
@@ -394,15 +381,11 @@ fn penalty_weight_zero_matches_statsmodels_logit() {
 
 #[test]
 fn wald_confidence_intervals_reject_bad_alpha() {
-    let fit = fit_logistic(
-        features(),
-        true,
-        separation::Y,
-        None,
-        None,
-        LogisticOptions::default(),
-    )
-    .unwrap();
+    let fit = LogisticData::new(features(), true)
+        .unwrap()
+        .model(separation::Y)
+        .fit()
+        .unwrap();
     for alpha in [f64::NAN, -0.05, 0.0, 1.0, 1.5] {
         assert!(matches!(
             fit.wald_confidence_intervals(alpha),
@@ -424,39 +407,29 @@ fn options_with_max_iterations(max_iterations: usize) -> LogisticOptions {
 
 #[test]
 fn converges_on_final_permitted_iteration() {
-    let fit = fit_logistic(
-        features(),
-        true,
-        separation::Y,
-        None,
-        None,
-        LogisticOptions::default(),
-    )
-    .unwrap();
+    let fit = LogisticData::new(features(), true)
+        .unwrap()
+        .model(separation::Y)
+        .fit()
+        .unwrap();
     assert_eq!(fit.status(), FitStatus::Converged);
     assert!(fit.iterations() >= 2);
 
-    let exact = fit_logistic(
-        features(),
-        true,
-        separation::Y,
-        None,
-        None,
-        options_with_max_iterations(fit.iterations()),
-    )
-    .unwrap();
+    let exact = LogisticData::new(features(), true)
+        .unwrap()
+        .model(separation::Y)
+        .options(options_with_max_iterations(fit.iterations()))
+        .fit()
+        .unwrap();
     assert_eq!(exact.status(), FitStatus::Converged);
     assert_eq!(exact.iterations(), fit.iterations());
 
-    let short = fit_logistic(
-        features(),
-        true,
-        separation::Y,
-        None,
-        None,
-        options_with_max_iterations(fit.iterations() - 1),
-    )
-    .unwrap();
+    let short = LogisticData::new(features(), true)
+        .unwrap()
+        .model(separation::Y)
+        .options(options_with_max_iterations(fit.iterations() - 1))
+        .fit()
+        .unwrap();
     assert_eq!(short.status(), FitStatus::MaximumIterations);
 }
 
@@ -469,15 +442,12 @@ fn matches_logistf_with_one_centered_carrier() {
     let x: Vec<f64> = (0..20).map(|i| f64::from(i == 0) - 1.0 / 20.0).collect();
     let response: Vec<f64> = (0..20).map(|i| f64::from(i % 2 == 0)).collect();
     let offset: Vec<f64> = (0..20).map(|i| 0.2 * f64::from(i) - 2.0).collect();
-    let fit = fit_logistic(
-        MatrixView::from_row_major(&x, x.len(), 1).unwrap(),
-        false,
-        &response,
-        None,
-        Some(&offset),
-        LogisticOptions::default(),
-    )
-    .unwrap();
+    let fit = LogisticData::new(MatrixView::from_row_major(&x, x.len(), 1).unwrap(), false)
+        .unwrap()
+        .model(&response)
+        .offset(&offset)
+        .fit()
+        .unwrap();
 
     assert_eq!(fit.status(), FitStatus::Converged);
     assert_close(fit.coefficients(), &[3.283_061_328_98], 1e-4);
@@ -485,15 +455,11 @@ fn matches_logistf_with_one_centered_carrier() {
 
 #[test]
 fn lrt_matches_logistf_with_separation() {
-    let fit = fit_logistic(
-        features(),
-        true,
-        separation::Y,
-        None,
-        None,
-        LogisticOptions::default(),
-    )
-    .unwrap();
+    let fit = LogisticData::new(features(), true)
+        .unwrap()
+        .model(separation::Y)
+        .fit()
+        .unwrap();
 
     let expected_p_values = [
         0.000_208_414_714_9,
@@ -514,15 +480,11 @@ fn lrt_matches_logistf_with_separation() {
 
 #[test]
 fn lrt_cold_start_matches_warm_start() {
-    let fit = fit_logistic(
-        features(),
-        true,
-        separation::Y,
-        None,
-        None,
-        LogisticOptions::default(),
-    )
-    .unwrap();
+    let fit = LogisticData::new(features(), true)
+        .unwrap()
+        .model(separation::Y)
+        .fit()
+        .unwrap();
 
     for index in 0..fit.parameters().len() {
         let warm = fit.likelihood_ratio_test(&[index], true).unwrap();
@@ -535,15 +497,11 @@ fn lrt_cold_start_matches_warm_start() {
 
 #[test]
 fn lrt_rejects_bad_indices() {
-    let fit = fit_logistic(
-        features(),
-        true,
-        separation::Y,
-        None,
-        None,
-        LogisticOptions::default(),
-    )
-    .unwrap();
+    let fit = LogisticData::new(features(), true)
+        .unwrap()
+        .model(separation::Y)
+        .fit()
+        .unwrap();
     for indices in [&[fit.parameters().len()][..], &[], &[1, 2, 1]] {
         assert!(
             matches!(
@@ -557,15 +515,11 @@ fn lrt_rejects_bad_indices() {
 
 #[test]
 fn joint_lrt_matches_logistf_with_separation() {
-    let fit = fit_logistic(
-        features(),
-        true,
-        separation::Y,
-        None,
-        None,
-        LogisticOptions::default(),
-    )
-    .unwrap();
+    let fit = LogisticData::new(features(), true)
+        .unwrap()
+        .model(separation::Y)
+        .fit()
+        .unwrap();
     let lrt = fit.likelihood_ratio_test(&[1, 2], true).unwrap();
     assert!(lrt.is_valid(), "status {:?}", lrt.status());
     assert_eq!(lrt.degrees_of_freedom(), 2);
@@ -582,7 +536,12 @@ fn lrt_on_a_nonconverged_fit_is_invalid_without_error() {
         penalty_weight: 0.0,
         ..LogisticOptions::default()
     };
-    let fit = fit_logistic(features(), true, separation::Y, None, None, options).unwrap();
+    let fit = LogisticData::new(features(), true)
+        .unwrap()
+        .model(separation::Y)
+        .options(options)
+        .fit()
+        .unwrap();
     assert_eq!(fit.status(), FitStatus::MaximumIterations);
 
     let lrt = fit.likelihood_ratio_test(&[0], true).unwrap();
@@ -613,15 +572,12 @@ fn lrt_design_check_failure_affects_only_that_test() {
         1.0, 0.0, //
         2.0, -2.0,
     ];
-    let fit = fit_logistic(
-        MatrixView::from_row_major(&x, 7, 2).unwrap(),
-        true,
-        &[1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0],
-        None,
-        Some(&[-50.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
-        LogisticOptions::default(),
-    )
-    .unwrap();
+    let fit = LogisticData::new(MatrixView::from_row_major(&x, 7, 2).unwrap(), true)
+        .unwrap()
+        .model(&[1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0])
+        .offset(&[-50.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        .fit()
+        .unwrap();
     assert!(fit.status().is_converged());
     assert_eq!(
         fit.likelihood_ratio_test(&[1], false).unwrap_err(),
@@ -632,15 +588,11 @@ fn lrt_design_check_failure_affects_only_that_test() {
 
 #[test]
 fn profile_ci_matches_logistf_with_separation() {
-    let fit = fit_logistic(
-        features(),
-        true,
-        separation::Y,
-        None,
-        None,
-        LogisticOptions::default(),
-    )
-    .unwrap();
+    let fit = LogisticData::new(features(), true)
+        .unwrap()
+        .model(separation::Y)
+        .fit()
+        .unwrap();
 
     let expected_lower = [
         1.390_104_289_9,
@@ -674,15 +626,11 @@ fn profile_ci_matches_logistf_with_separation() {
 
 #[test]
 fn profile_ci_rejects_bad_inputs() {
-    let fit = fit_logistic(
-        features(),
-        true,
-        separation::Y,
-        None,
-        None,
-        LogisticOptions::default(),
-    )
-    .unwrap();
+    let fit = LogisticData::new(features(), true)
+        .unwrap()
+        .model(separation::Y)
+        .fit()
+        .unwrap();
 
     for alpha in [f64::NAN, -0.05, 0.0, 1.0, 1.5] {
         assert!(matches!(
@@ -720,15 +668,11 @@ fn profile_ci_rejects_bad_inputs() {
 
 #[test]
 fn profile_ci_nonconvergence_returns_a_nan_bound() {
-    let fit = fit_logistic(
-        features(),
-        true,
-        separation::Y,
-        None,
-        None,
-        LogisticOptions::default(),
-    )
-    .unwrap();
+    let fit = LogisticData::new(features(), true)
+        .unwrap()
+        .model(separation::Y)
+        .fit()
+        .unwrap();
 
     let bound = fit
         .profile_confidence_bound(
@@ -753,14 +697,14 @@ fn profile_bound_on_the_wrong_side_is_invalid() {
     // points. From the second starting point it converges to the upper bound, 0.9173, after 11
     // iterations. With a limit of 10, the run from the second starting point ends one iteration
     // before it converges. The interval from logistf 1.26.1 is [-8.9864, 0.9173].
-    let fit = fit_logistic(
+    let fit = LogisticData::new(
         MatrixView::from_row_major(&[-2.0, -2.0, -4.0, -2.0, -3.0], 5, 1).unwrap(),
         true,
-        &[1.0, 0.0, 1.0, 0.0, 0.0],
-        None,
-        Some(&[0.0, 3.0, 0.0, -5.0, -5.0]),
-        LogisticOptions::default(),
     )
+    .unwrap()
+    .model(&[1.0, 0.0, 1.0, 0.0, 0.0])
+    .offset(&[0.0, 3.0, 0.0, -5.0, -5.0])
+    .fit()
     .unwrap();
     for max_iterations in [10, 50] {
         let options = ProfileOptions {
@@ -781,7 +725,12 @@ fn profile_ci_on_a_nonconverged_fit_is_invalid_without_error() {
         penalty_weight: 0.0,
         ..LogisticOptions::default()
     };
-    let fit = fit_logistic(features(), true, separation::Y, None, None, options).unwrap();
+    let fit = LogisticData::new(features(), true)
+        .unwrap()
+        .model(separation::Y)
+        .options(options)
+        .fit()
+        .unwrap();
     assert_eq!(fit.status(), FitStatus::MaximumIterations);
 
     let bound = fit
@@ -796,15 +745,12 @@ fn profile_ci_on_a_nonconverged_fit_is_invalid_without_error() {
 
 #[test]
 fn wald_inference_on_a_nonconverged_fit_is_nan() {
-    let fit = fit_logistic(
-        features(),
-        true,
-        separation::Y,
-        None,
-        None,
-        options_with_max_iterations(1),
-    )
-    .unwrap();
+    let fit = LogisticData::new(features(), true)
+        .unwrap()
+        .model(separation::Y)
+        .options(options_with_max_iterations(1))
+        .fit()
+        .unwrap();
     assert_eq!(fit.status(), FitStatus::MaximumIterations);
 
     assert!(fit.parameters().iter().all(|value| value.is_finite()));
@@ -820,15 +766,11 @@ fn wald_inference_on_a_nonconverged_fit_is_nan() {
 fn profile_ci_with_a_single_parameter() {
     let x = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
     let y = [0.0, 0.0, 1.0, 0.0, 1.0, 1.0];
-    let fit = fit_logistic(
-        MatrixView::from_row_major(&x, 6, 1).unwrap(),
-        false,
-        &y,
-        None,
-        None,
-        LogisticOptions::default(),
-    )
-    .unwrap();
+    let fit = LogisticData::new(MatrixView::from_row_major(&x, 6, 1).unwrap(), false)
+        .unwrap()
+        .model(&y)
+        .fit()
+        .unwrap();
 
     let [low, high] = fit.profile_confidence_interval(0, 0.05, PROFILE).unwrap();
     assert!(low.is_valid(), "status {:?}", low.status());
@@ -860,23 +802,21 @@ fn integer_weights_match_duplicated_rows_across_evaluation_blocks() {
             penalty_weight,
             ..LogisticOptions::default()
         };
-        let weighted = fit_logistic(
-            MatrixView::from_row_major(&x, n, p).unwrap(),
-            true,
-            &y,
-            Some(&vec![copies as f64; n]),
-            None,
-            options,
-        )
-        .unwrap();
-        let duplicated = fit_logistic(
+        let weighted = LogisticData::new(MatrixView::from_row_major(&x, n, p).unwrap(), true)
+            .unwrap()
+            .model(&y)
+            .sample_weight(&vec![copies as f64; n])
+            .options(options)
+            .fit()
+            .unwrap();
+        let duplicated = LogisticData::new(
             MatrixView::from_row_major(&duplicated_x, n * copies, p).unwrap(),
             true,
-            &duplicated_y,
-            None,
-            None,
-            options,
         )
+        .unwrap()
+        .model(&duplicated_y)
+        .options(options)
+        .fit()
         .unwrap();
         assert_eq!(weighted.status(), FitStatus::Converged);
         assert_eq!(duplicated.status(), FitStatus::Converged);
@@ -913,17 +853,20 @@ fn integer_weights_match_duplicated_rows() {
             penalty_weight,
             ..LogisticOptions::default()
         };
-        let weighted = fit_logistic(
-            features(),
-            true,
-            separation::Y,
-            Some(&weight),
-            None,
-            options,
-        )
-        .unwrap();
+        let weighted = LogisticData::new(features(), true)
+            .unwrap()
+            .model(separation::Y)
+            .sample_weight(&weight)
+            .options(options)
+            .fit()
+            .unwrap();
         let duplicated_features = MatrixView::from_row_major(&x, y.len(), p).unwrap();
-        let duplicated = fit_logistic(duplicated_features, true, &y, None, None, options).unwrap();
+        let duplicated = LogisticData::new(duplicated_features, true)
+            .unwrap()
+            .model(&y)
+            .options(options)
+            .fit()
+            .unwrap();
 
         assert_eq!(weighted.status(), FitStatus::Converged);
         assert_eq!(duplicated.status(), FitStatus::Converged);
@@ -963,15 +906,11 @@ fn integer_weights_match_duplicated_rows() {
 
 #[test]
 fn prediction_rejects_invalid_inputs() {
-    let fit = fit_logistic(
-        features(),
-        true,
-        separation::Y,
-        None,
-        None,
-        LogisticOptions::default(),
-    )
-    .unwrap();
+    let fit = LogisticData::new(features(), true)
+        .unwrap()
+        .model(separation::Y)
+        .fit()
+        .unwrap();
 
     assert!(matches!(
         fit.predict_probability(features(), Some(&[0.0; separation::N - 1])),
@@ -1009,40 +948,21 @@ fn rejects_bad_shapes() {
     let single = [1.0];
     let one_sample = MatrixView::from_row_major(&single, 1, 1).unwrap();
     assert!(matches!(
-        fit_logistic(
-            one_sample,
-            true,
-            &[0.0],
-            None,
-            None,
-            LogisticOptions::default()
-        ),
+        LogisticData::new(one_sample, true),
         Err(Error::InvalidDimensions(_))
     ));
+    let data = LogisticData::new(four_rows(), true).unwrap();
     assert!(matches!(
-        fit_logistic(
-            four_rows(),
-            true,
-            &[0.0, 1.0],
-            None,
-            None,
-            LogisticOptions::default()
-        ),
+        data.model(&[0.0, 1.0]).fit(),
         Err(Error::InvalidDimensions(_))
     ));
 }
 
 #[test]
 fn rejects_bad_values() {
+    let data = LogisticData::new(four_rows(), true).unwrap();
     assert!(matches!(
-        fit_logistic(
-            four_rows(),
-            true,
-            &[0.0, 0.5, 1.0, 1.0],
-            None,
-            None,
-            LogisticOptions::default()
-        ),
+        data.model(&[0.0, 0.5, 1.0, 1.0]).fit(),
         Err(Error::InvalidInput(_))
     ));
     let negative_penalty = LogisticOptions {
@@ -1050,67 +970,39 @@ fn rejects_bad_values() {
         ..LogisticOptions::default()
     };
     assert!(matches!(
-        fit_logistic(
-            four_rows(),
-            true,
-            &FOUR_ROW_RESPONSE,
-            None,
-            None,
-            negative_penalty
-        ),
+        data.model(&FOUR_ROW_RESPONSE)
+            .options(negative_penalty)
+            .fit(),
         Err(Error::InvalidInput(_))
     ));
     let negative_weight = [1.0, 1.0, 1.0, -1.0];
     assert!(matches!(
-        fit_logistic(
-            four_rows(),
-            true,
-            &FOUR_ROW_RESPONSE,
-            Some(negative_weight.as_slice()),
-            None,
-            LogisticOptions::default()
-        ),
+        data.model(&FOUR_ROW_RESPONSE)
+            .sample_weight(&negative_weight)
+            .fit(),
         Err(Error::InvalidInput(_))
     ));
     let with_nan = [0.5, 1.5, f64::NAN, 3.5];
     let nan_features = MatrixView::from_row_major(&with_nan, 4, 1).unwrap();
     assert!(matches!(
-        fit_logistic(
-            nan_features,
-            true,
-            &FOUR_ROW_RESPONSE,
-            None,
-            None,
-            LogisticOptions::default()
-        ),
+        LogisticData::new(nan_features, true),
         Err(Error::InvalidInput(_))
     ));
 }
 
 #[test]
 fn requires_positive_weight_in_each_class() {
+    let data = LogisticData::new(four_rows(), true).unwrap();
     assert!(matches!(
-        fit_logistic(
-            four_rows(),
-            true,
-            &[1.0, 1.0, 1.0, 1.0],
-            None,
-            None,
-            LogisticOptions::default()
-        ),
+        data.model(&[1.0, 1.0, 1.0, 1.0]).fit(),
         Err(Error::InvalidInput(_))
     ));
     // Both classes are present. The rows with response 0 have zero weight.
     let unweighted_class = [0.0, 0.0, 1.0, 1.0];
     assert!(matches!(
-        fit_logistic(
-            four_rows(),
-            true,
-            &FOUR_ROW_RESPONSE,
-            Some(unweighted_class.as_slice()),
-            None,
-            LogisticOptions::default()
-        ),
+        data.model(&FOUR_ROW_RESPONSE)
+            .sample_weight(&unweighted_class)
+            .fit(),
         Err(Error::InvalidInput(_))
     ));
 }
@@ -1121,14 +1013,10 @@ fn requires_enough_effective_samples() {
     let square = [1.0, 2.0, 3.0, 4.0];
     let two_by_two = MatrixView::from_row_major(&square, 2, 2).unwrap();
     assert!(matches!(
-        fit_logistic(
-            two_by_two,
-            true,
-            &[0.0, 1.0],
-            None,
-            None,
-            LogisticOptions::default()
-        ),
+        LogisticData::new(two_by_two, true)
+            .unwrap()
+            .model(&[0.0, 1.0])
+            .fit(),
         Err(Error::InvalidDimensions(_))
     ));
     // With three features and an intercept, k = 4 is larger than the number of positive-weight
@@ -1142,14 +1030,11 @@ fn requires_enough_effective_samples() {
     let four_by_three = MatrixView::from_row_major(&wide, 4, 3).unwrap();
     let one_zero_weight = [1.0, 1.0, 1.0, 0.0];
     assert!(matches!(
-        fit_logistic(
-            four_by_three,
-            true,
-            &FOUR_ROW_RESPONSE,
-            Some(one_zero_weight.as_slice()),
-            None,
-            LogisticOptions::default()
-        ),
+        LogisticData::new(four_by_three, true)
+            .unwrap()
+            .model(&FOUR_ROW_RESPONSE)
+            .sample_weight(&one_zero_weight)
+            .fit(),
         Err(Error::InvalidDimensions(_))
     ));
 }
@@ -1169,15 +1054,12 @@ fn fitted_probabilities_near_one_converge() {
                     ..LogisticOptions::default()
                 };
                 let fit = |response: &[f64], offset: &[f64]| {
-                    let fit = fit_logistic(
-                        features,
-                        false,
-                        response,
-                        sample_weight,
-                        Some(offset),
-                        options,
-                    )
-                    .unwrap();
+                    let data = LogisticData::new(features, false).unwrap();
+                    let mut model = data.model(response).offset(offset).options(options);
+                    if let Some(sample_weight) = sample_weight {
+                        model = model.sample_weight(sample_weight);
+                    }
+                    let fit = model.fit().unwrap();
                     assert_eq!(fit.status(), FitStatus::Converged);
                     fit.parameters()[0]
                 };

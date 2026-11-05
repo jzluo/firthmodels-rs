@@ -2,8 +2,8 @@
 //! `<https://github.com/jzluo/firthmodels/blob/60af10d/tests/test_cox.py>`.
 
 use firthmodels::{
-    CoxFit, CoxOptions, Error, FitStatus, MatrixView, ProfileOptions, Tail, concordance_index,
-    fit_cox,
+    CoxData, CoxFit, CoxOptions, Error, FitStatus, MatrixView, ProfileOptions, Tail,
+    concordance_index,
 };
 use proptest::prelude::*;
 
@@ -20,28 +20,20 @@ const PROFILE: ProfileOptions = ProfileOptions {
 
 fn separation_fit() -> CoxFit {
     let x = MatrixView::from_row_major(separation::X, separation::N, separation::P).unwrap();
-    fit_cox(
-        x,
-        separation::TIME,
-        separation::EVENT,
-        None,
-        None,
-        CoxOptions::default(),
-    )
-    .unwrap()
+    CoxData::new(x, separation::TIME, separation::EVENT)
+        .unwrap()
+        .model()
+        .fit()
+        .unwrap()
 }
 
 fn two_individual_fit(features: &[f64; 2]) -> CoxFit {
     let x = MatrixView::from_row_major(features, 2, 1).unwrap();
-    fit_cox(
-        x,
-        &[1.0, 2.0],
-        &[true, false],
-        None,
-        None,
-        CoxOptions::default(),
-    )
-    .unwrap()
+    CoxData::new(x, &[1.0, 2.0], &[true, false])
+        .unwrap()
+        .model()
+        .fit()
+        .unwrap()
 }
 
 fn assert_close(actual: &[f64], expected: &[f64], rtol: f64) {
@@ -150,7 +142,12 @@ fn profile_bounds_match_coxphf_with_features_on_different_scales() {
             penalty_weight,
             ..CoxOptions::default()
         };
-        let fit = fit_cox(features, &time, &event, None, None, options).unwrap();
+        let fit = CoxData::new(features, &time, &event)
+            .unwrap()
+            .model()
+            .options(options)
+            .fit()
+            .unwrap();
         let bound = fit
             .profile_confidence_bound(0, tail, 0.05, ProfileOptions::default())
             .unwrap();
@@ -166,15 +163,12 @@ fn penalty_weight_zero_matches_lifelines_coxph() {
         penalty_weight: 0.0,
         ..CoxOptions::default()
     };
-    let fit = fit_cox(
-        x,
-        unpenalized::TIME,
-        unpenalized::EVENT,
-        None,
-        None,
-        options,
-    )
-    .unwrap();
+    let fit = CoxData::new(x, unpenalized::TIME, unpenalized::EVENT)
+        .unwrap()
+        .model()
+        .options(options)
+        .fit()
+        .unwrap();
 
     assert_eq!(fit.status(), FitStatus::Converged);
 
@@ -229,15 +223,12 @@ fn constant_offset_shift_leaves_predictions_unchanged() {
     // baseline hazard by exp(c). Adding c to the new rows' offsets too gives the same predictions.
     let features = MatrixView::from_row_major(separation::X, separation::N, separation::P).unwrap();
     let fit = |offset: &[f64]| {
-        fit_cox(
-            features,
-            separation::TIME,
-            separation::EVENT,
-            None,
-            Some(offset),
-            CoxOptions::default(),
-        )
-        .unwrap()
+        CoxData::new(features, separation::TIME, separation::EVENT)
+            .unwrap()
+            .model()
+            .offset(offset)
+            .fit()
+            .unwrap()
     };
     let offset: Vec<f64> = (0..separation::N)
         .map(|i| [-0.3, -0.1, 0.0, 0.2, 0.4][i % 5])
@@ -314,7 +305,11 @@ fn censoring_before_every_event_preserves_fit_and_inference() {
     time.push(1.0);
     event.push(false);
     let view = MatrixView::from_row_major(&x, time.len(), 3).unwrap();
-    let expected = fit_cox(view, &time, &event, None, None, CoxOptions::default()).unwrap();
+    let expected = CoxData::new(view, &time, &event)
+        .unwrap()
+        .model()
+        .fit()
+        .unwrap();
     assert_eq!(expected.status(), FitStatus::Converged);
     let close = |actual: &[f64], expected: &[f64]| {
         assert_eq!(actual.len(), expected.len());
@@ -332,7 +327,11 @@ fn censoring_before_every_event_preserves_fit_and_inference() {
         event.push(false);
     }
     let extended = MatrixView::from_row_major(&x, time.len(), 3).unwrap();
-    let fit = fit_cox(extended, &time, &event, None, None, CoxOptions::default()).unwrap();
+    let fit = CoxData::new(extended, &time, &event)
+        .unwrap()
+        .model()
+        .fit()
+        .unwrap();
     assert_eq!(fit.status(), expected.status());
     assert_eq!(fit.iterations(), expected.iterations());
     close(fit.coefficients(), expected.coefficients());
@@ -378,25 +377,18 @@ fn weighted_and_duplicated_fits(copies: [u32; 4]) -> (CoxFit, CoxFit) {
         }
     }
     let features = MatrixView::from_row_major(separation::X, separation::N, p).unwrap();
-    let weighted = fit_cox(
-        features,
-        separation::TIME,
-        separation::EVENT,
-        Some(&weight),
-        None,
-        CoxOptions::default(),
-    )
-    .unwrap();
+    let weighted = CoxData::new(features, separation::TIME, separation::EVENT)
+        .unwrap()
+        .model()
+        .sample_weight(&weight)
+        .fit()
+        .unwrap();
     let duplicated_features = MatrixView::from_row_major(&x, time.len(), p).unwrap();
-    let duplicated = fit_cox(
-        duplicated_features,
-        &time,
-        &event,
-        None,
-        None,
-        CoxOptions::default(),
-    )
-    .unwrap();
+    let duplicated = CoxData::new(duplicated_features, &time, &event)
+        .unwrap()
+        .model()
+        .fit()
+        .unwrap();
     (weighted, duplicated)
 }
 
@@ -455,15 +447,12 @@ fn offset_matches_coefficient_shift() {
         .collect();
     let features = MatrixView::from_row_major(separation::X, separation::N, separation::P).unwrap();
     let fit = separation_fit();
-    let offset_fit = fit_cox(
-        features,
-        separation::TIME,
-        separation::EVENT,
-        None,
-        Some(&offset),
-        CoxOptions::default(),
-    )
-    .unwrap();
+    let offset_fit = CoxData::new(features, separation::TIME, separation::EVENT)
+        .unwrap()
+        .model()
+        .offset(&offset)
+        .fit()
+        .unwrap();
 
     let mut expected = fit.coefficients().to_vec();
     expected[column] -= shift;
@@ -493,7 +482,12 @@ fn unpenalized_monotone_likelihood_does_not_converge() {
         ..CoxOptions::default()
     };
     let features = MatrixView::from_row_major(&x, 8, 1).unwrap();
-    let fit = fit_cox(features, &x, &event, None, None, options).unwrap();
+    let fit = CoxData::new(features, &x, &event)
+        .unwrap()
+        .model()
+        .options(options)
+        .fit()
+        .unwrap();
     assert!(!fit.status().is_converged(), "status {:?}", fit.status());
 }
 
@@ -525,16 +519,23 @@ fn duplicate_columns_are_rank_deficient() {
             ..CoxOptions::default()
         };
         for result in [
-            fit_cox(x, &time, &event, None, None, options),
-            fit_cox(binary, &time, &event, Some(&sample_weight), None, options),
-            fit_cox(
-                late_binary,
-                &time,
-                &event,
-                Some(&unweighted_first_event),
-                None,
-                options,
-            ),
+            CoxData::new(x, &time, &event)
+                .unwrap()
+                .model()
+                .options(options)
+                .fit(),
+            CoxData::new(binary, &time, &event)
+                .unwrap()
+                .model()
+                .sample_weight(&sample_weight)
+                .options(options)
+                .fit(),
+            CoxData::new(late_binary, &time, &event)
+                .unwrap()
+                .model()
+                .sample_weight(&unweighted_first_event)
+                .options(options)
+                .fit(),
         ] {
             assert!(
                 matches!(
@@ -564,14 +565,15 @@ fn indicator_columns_that_sum_to_one_are_rank_deficient() {
             penalty_weight,
             ..CoxOptions::default()
         };
-        let result = fit_cox(
+        let result = CoxData::new(
             MatrixView::from_row_major(&x, n, k).unwrap(),
             &time,
             &[true; 60],
-            None,
-            None,
-            options,
-        );
+        )
+        .unwrap()
+        .model()
+        .options(options)
+        .fit();
         assert!(
             matches!(
                 result,
@@ -668,60 +670,51 @@ fn fit_rejects_bad_inputs() {
     let x = MatrixView::from_row_major(&x_data, 2, 1).unwrap();
     let time = [1.0, 2.0];
     let event = [true, false];
+    let data = CoxData::new(x, &time, &event).unwrap();
 
     let bad_penalty = CoxOptions {
         penalty_weight: f64::NAN,
         ..CoxOptions::default()
     };
     assert!(matches!(
-        fit_cox(x, &time, &event, None, None, bad_penalty),
+        data.model().options(bad_penalty).fit(),
         Err(Error::InvalidInput(_))
     ));
 
     let nan_x_data = [f64::NAN, 0.0];
     let nan_x = MatrixView::from_row_major(&nan_x_data, 2, 1).unwrap();
     assert!(matches!(
-        fit_cox(nan_x, &time, &event, None, None, CoxOptions::default()),
+        CoxData::new(nan_x, &time, &event),
         Err(Error::InvalidInput(_))
     ));
 
     // The survival-data validation rejects data in which every sample is censored.
     assert!(matches!(
-        fit_cox(x, &time, &[false, false], None, None, CoxOptions::default()),
+        CoxData::new(x, &time, &[false, false]),
         Err(Error::InvalidInput(_))
     ));
 
-    let fit = |sample_weight: Option<&[f64]>, offset: Option<&[f64]>| {
-        fit_cox(
-            x,
-            &time,
-            &event,
-            sample_weight,
-            offset,
-            CoxOptions::default(),
-        )
-    };
     assert!(matches!(
-        fit(Some(&[1.0]), None),
+        data.model().sample_weight(&[1.0]).fit(),
         Err(Error::InvalidDimensions(_))
     ));
     assert!(matches!(
-        fit(None, Some(&[0.0])),
+        data.model().offset(&[0.0]).fit(),
         Err(Error::InvalidDimensions(_))
     ));
     for sample_weight in [[1.0, -1.0], [f64::NAN, 1.0], [f64::INFINITY, 1.0]] {
         assert!(matches!(
-            fit(Some(&sample_weight), None),
+            data.model().sample_weight(&sample_weight).fit(),
             Err(Error::InvalidInput(_))
         ));
     }
     assert!(matches!(
-        fit(None, Some(&[f64::NAN, 0.0])),
+        data.model().offset(&[f64::NAN, 0.0]).fit(),
         Err(Error::InvalidInput(_))
     ));
     // The only event has zero weight.
     assert!(matches!(
-        fit(Some(&[0.0, 1.0]), None),
+        data.model().sample_weight(&[0.0, 1.0]).fit(),
         Err(Error::InvalidInput(_))
     ));
 }

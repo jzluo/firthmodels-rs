@@ -64,8 +64,8 @@ impl Default for CoxOptions {
     }
 }
 
-/// Survival data for Cox regression, sorted and grouped once. Every call to [`fit`](Self::fit)
-/// reuses the sorted data.
+/// Survival data for Cox regression, sorted and grouped once. Every model from
+/// [`model`](Self::model) reuses the sorted data.
 ///
 /// Clones share one copy of the data.
 #[derive(Clone)]
@@ -91,35 +91,78 @@ impl CoxData {
         })
     }
 
-    /// Fits the Cox proportional hazards model with Firth's bias reduction to this data.
-    ///
-    /// `sample_weight[i]` is the nonnegative weight of input row `i`. When `sample_weight` is
-    /// `None`, every row has a weight of one. `offset[i]` is added to the linear predictor of input
-    /// row `i`. When `offset` is `None`, every row has an offset of zero. Weights are counts. An
+    /// Returns the Cox model of this data. The model has unit weights, zero offsets, and default
+    /// options until [`sample_weight`](CoxModel::sample_weight), [`offset`](CoxModel::offset), or
+    /// [`options`](CoxModel::options) changes them.
+    pub fn model(&self) -> CoxModel<'_> {
+        CoxModel {
+            data: self,
+            sample_weight: None,
+            offset: None,
+            options: CoxOptions::default(),
+        }
+    }
+}
+
+// A derived `Debug` implementation would print every row of the sorted data.
+impl fmt::Debug for CoxData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CoxData")
+            .field("retained_rows", &self.inner.n_samples())
+            .field("n_features", &self.inner.n_features())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A Cox proportional hazards model before it is fitted. [`CoxData::model`] creates the model.
+#[derive(Clone, Copy)]
+#[must_use = "call `fit` to fit the model"]
+pub struct CoxModel<'a> {
+    data: &'a CoxData,
+    sample_weight: Option<&'a [f64]>,
+    offset: Option<&'a [f64]>,
+    options: CoxOptions,
+}
+
+impl<'a> CoxModel<'a> {
+    /// `sample_weight[i]` is the nonnegative weight of input row `i`. Weights are counts. An
     /// integer weight `m` gives the same estimates, standard errors, likelihood ratio tests, and
     /// profile intervals as `m` copies of the row. A zero weight gives the same results as removing
     /// the row.
+    pub fn sample_weight(mut self, sample_weight: &'a [f64]) -> Self {
+        self.sample_weight = Some(sample_weight);
+        self
+    }
+
+    /// `offset[i]` is added to the linear predictor of input row `i`.
+    pub fn offset(mut self, offset: &'a [f64]) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+
+    pub fn options(mut self, options: CoxOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Fits the Cox proportional hazards model with Firth's bias reduction.
     ///
     /// # Errors
     ///
-    /// Returns `InvalidDimensions` if `sample_weight` or `offset` does not have one value per input
-    /// row. Returns `InvalidInput` for an out-of-range option, a negative or non-finite weight, a
+    /// Returns `InvalidDimensions` if the weights or offsets do not have one value per input row.
+    /// Returns `InvalidInput` for an out-of-range option, a negative or non-finite weight, a
     /// non-finite offset, or no positive-weight event. Returns `RankDeficient` when some linear
     /// combination of the columns is constant over the positive-weight rows. For example, a full
     /// set of indicator columns sums to one on every row. The partial likelihood does not depend on
     /// such a combination. Returns a numerical error if a factorization fails at the starting
     /// coefficients or while the solver computes a Newton step.
-    pub fn fit(
-        &self,
-        sample_weight: Option<&[f64]>,
-        offset: Option<&[f64]>,
-        options: CoxOptions,
-    ) -> Result<CoxFit> {
+    pub fn fit(self) -> Result<CoxFit> {
+        let options = self.options;
         options.solver.validate()?;
         validate_penalty_weight(options.penalty_weight)?;
 
-        let data = &*self.inner;
-        let inputs = CaseInputs::new(data, sample_weight, offset)?;
+        let data = &*self.data.inner;
+        let inputs = CaseInputs::new(data, self.sample_weight, self.offset)?;
         let mut objective = CoxObjective::new(data, &inputs, options.penalty_weight);
         let result = newton_raphson(options.solver, vec![0.0; data.n_features()], |beta| {
             objective.evaluate(beta)
@@ -147,19 +190,21 @@ impl CoxData {
             log_cumulative_baseline_hazard,
             cumulative_baseline_hazard,
             baseline_survival,
-            data: self.clone(),
+            data: self.data.clone(),
             inputs,
             options,
         })
     }
 }
 
-// A derived `Debug` implementation would print every row of the sorted data.
-impl fmt::Debug for CoxData {
+// A derived `Debug` implementation would print every row of the weights and offsets.
+impl fmt::Debug for CoxModel<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CoxData")
-            .field("retained_rows", &self.inner.n_samples())
-            .field("n_features", &self.inner.n_features())
+        f.debug_struct("CoxModel")
+            .field("data", self.data)
+            .field("sample_weight_len", &self.sample_weight.map(<[f64]>::len))
+            .field("offset_len", &self.offset.map(<[f64]>::len))
+            .field("options", &self.options)
             .finish_non_exhaustive()
     }
 }
@@ -512,23 +557,6 @@ impl RankCounts {
         }
         sum
     }
-}
-
-/// Fits a Cox proportional hazards model with Firth's bias reduction by calling
-/// [`CoxData::new`] and then [`CoxData::fit`].
-///
-/// # Errors
-///
-/// Returns the errors of [`CoxData::new`] and [`CoxData::fit`].
-pub fn fit_cox(
-    features: MatrixView,
-    time: &[f64],
-    event: &[bool],
-    sample_weight: Option<&[f64]>,
-    offset: Option<&[f64]>,
-    options: CoxOptions,
-) -> Result<CoxFit> {
-    CoxData::new(features, time, event)?.fit(sample_weight, offset, options)
 }
 
 /// Computes the Breslow cumulative baseline hazard from a risk-set pass at the fitted coefficients.
@@ -1590,7 +1618,11 @@ mod tests {
             quantities.modified_score[0]
         );
 
-        let fit = fit_cox(x, &time, &event, None, None, CoxOptions::default()).unwrap();
+        let fit = CoxData::new(x, &time, &event)
+            .unwrap()
+            .model()
+            .fit()
+            .unwrap();
         assert!(fit.status().is_converged());
         assert!(
             (fit.coefficients()[0] - expected).abs() < 1e-6,
@@ -1608,7 +1640,11 @@ mod tests {
         let time = [1.0, 2.0];
         let event = [true, false];
 
-        let fit = fit_cox(x, &time, &event, None, None, CoxOptions::default()).unwrap();
+        let fit = CoxData::new(x, &time, &event)
+            .unwrap()
+            .model()
+            .fit()
+            .unwrap();
         let lrt = fit.likelihood_ratio_test(&[0], true).unwrap();
         assert!(lrt.is_valid(), "status {:?}", lrt.status());
 
