@@ -17,10 +17,10 @@ mod solver;
 mod sum;
 mod validation;
 
-pub use cox::{CoxData, CoxFit, CoxOptions, concordance_index, fit_cox};
+pub use cox::{CoxData, CoxFit, CoxModel, CoxOptions, concordance_index};
 pub use error::{Error, Result};
 pub use inference::{InferenceStatus, LrtResult, ProfileBound, ProfileOptions, Tail};
-pub use logistic::{LogisticData, LogisticFit, LogisticOptions, fit_logistic};
+pub use logistic::{LogisticData, LogisticFit, LogisticModel, LogisticOptions};
 pub use matrix::MatrixView;
 pub use solver::{FitStatus, NewtonOptions};
 

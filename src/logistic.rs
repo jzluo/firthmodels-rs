@@ -41,8 +41,8 @@ impl Default for LogisticOptions {
     }
 }
 
-/// A logistic regression design, checked and copied once. Every call to [`fit`](Self::fit) reuses
-/// the copy.
+/// A logistic regression design, checked and copied once. Every model from
+/// [`model`](Self::model) reuses the copy.
 ///
 /// Clones share one copy of the design.
 #[derive(Clone)]
@@ -103,13 +103,64 @@ impl LogisticData {
         })
     }
 
-    /// Fits the Firth-penalized logistic regression of `response` on this design.
-    ///
-    /// `sample_weight[i]` is the nonnegative weight of row `i`. When `sample_weight` is `None`,
-    /// every row has a weight of one. `offset[i]` is added to the linear predictor of row `i`. When
-    /// `offset` is `None`, every row has an offset of zero. Weights are counts. An integer weight
-    /// `m` gives the same estimates, standard errors, likelihood ratio tests, and profile intervals
-    /// as `m` copies of the row. A zero weight gives the same results as removing the row.
+    /// Returns the logistic regression of `response` on this design. The model has unit weights,
+    /// zero offsets, and default options until [`sample_weight`](LogisticModel::sample_weight),
+    /// [`offset`](LogisticModel::offset), or [`options`](LogisticModel::options) changes them.
+    pub fn model<'a>(&'a self, response: &'a [f64]) -> LogisticModel<'a> {
+        LogisticModel {
+            data: self,
+            response,
+            sample_weight: None,
+            offset: None,
+            options: LogisticOptions::default(),
+        }
+    }
+}
+
+// A derived `Debug` implementation would print every entry of the design.
+impl fmt::Debug for LogisticData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LogisticData")
+            .field("nrows", &self.inner.design.nrows())
+            .field("n_features", &self.inner.n_features)
+            .field("fit_intercept", &self.inner.fit_intercept)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A logistic regression model before it is fitted. [`LogisticData::model`] creates the model.
+#[derive(Clone, Copy)]
+#[must_use = "call `fit` to fit the model"]
+pub struct LogisticModel<'a> {
+    data: &'a LogisticData,
+    response: &'a [f64],
+    sample_weight: Option<&'a [f64]>,
+    offset: Option<&'a [f64]>,
+    options: LogisticOptions,
+}
+
+impl<'a> LogisticModel<'a> {
+    /// `sample_weight[i]` is the nonnegative weight of row `i`. Weights are counts. An integer
+    /// weight `m` gives the same estimates, standard errors, likelihood ratio tests, and profile
+    /// intervals as `m` copies of the row. A zero weight gives the same results as removing the
+    /// row.
+    pub fn sample_weight(mut self, sample_weight: &'a [f64]) -> Self {
+        self.sample_weight = Some(sample_weight);
+        self
+    }
+
+    /// `offset[i]` is added to the linear predictor of row `i`.
+    pub fn offset(mut self, offset: &'a [f64]) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+
+    pub fn options(mut self, options: LogisticOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Fits the Firth-penalized logistic regression.
     ///
     /// # Errors
     ///
@@ -120,14 +171,15 @@ impl LogisticData {
     /// fit runs this check only when the information is close to singular. Returns a numerical error
     /// if a factorization fails at the starting coefficients or while the solver computes a Newton
     /// step.
-    pub fn fit(
-        &self,
-        response: &[f64],
-        sample_weight: Option<&[f64]>,
-        offset: Option<&[f64]>,
-        options: LogisticOptions,
-    ) -> Result<LogisticFit> {
-        let design = &self.inner.design;
+    pub fn fit(self) -> Result<LogisticFit> {
+        let Self {
+            data,
+            response,
+            sample_weight,
+            offset,
+            options,
+        } = self;
+        let design = &data.inner.design;
         let (nrows, k) = design.shape();
         if response.len() != nrows {
             return Err(Error::InvalidDimensions(format!(
@@ -180,7 +232,7 @@ impl LogisticData {
 
         Ok(LogisticFit {
             estimate: Estimate::new(result),
-            data: self.clone(),
+            data: data.clone(),
             response: response.to_vec(),
             sample_weight,
             offset,
@@ -190,13 +242,14 @@ impl LogisticData {
     }
 }
 
-// A derived `Debug` implementation would print every entry of the design.
-impl fmt::Debug for LogisticData {
+// A derived `Debug` implementation would print every row of the response, weights, and offset.
+impl fmt::Debug for LogisticModel<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("LogisticData")
-            .field("nrows", &self.inner.design.nrows())
-            .field("n_features", &self.inner.n_features)
-            .field("fit_intercept", &self.inner.fit_intercept)
+        f.debug_struct("LogisticModel")
+            .field("data", self.data)
+            .field("sample_weight_len", &self.sample_weight.map(<[f64]>::len))
+            .field("offset_len", &self.offset.map(<[f64]>::len))
+            .field("options", &self.options)
             .finish_non_exhaustive()
     }
 }
@@ -431,22 +484,6 @@ impl LogisticFit {
             .map(expit)
             .collect())
     }
-}
-
-/// Fits a logistic regression by calling [`LogisticData::new`] and then [`LogisticData::fit`].
-///
-/// # Errors
-///
-/// Returns the errors of [`LogisticData::new`] and [`LogisticData::fit`].
-pub fn fit_logistic(
-    features: MatrixView,
-    fit_intercept: bool,
-    response: &[f64],
-    sample_weight: Option<&[f64]>,
-    offset: Option<&[f64]>,
-    options: LogisticOptions,
-) -> Result<LogisticFit> {
-    LogisticData::new(features, fit_intercept)?.fit(response, sample_weight, offset, options)
 }
 
 /// Checks the QR pivots of the positive-weight rows of `design` after each column is scaled to unit
@@ -1104,15 +1141,12 @@ mod tests {
     }
 
     fn prediction_fit() -> LogisticFit {
-        fit_logistic(
-            prediction_features(),
-            true,
-            &PREDICTION_RESPONSE,
-            None,
-            Some(&PREDICTION_OFFSET),
-            LogisticOptions::default(),
-        )
-        .unwrap()
+        LogisticData::new(prediction_features(), true)
+            .unwrap()
+            .model(&PREDICTION_RESPONSE)
+            .offset(&PREDICTION_OFFSET)
+            .fit()
+            .unwrap()
     }
 
     #[test]
