@@ -1,0 +1,37 @@
+[package]
+name = "firthmodels"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Firth-penalized logistic and Cox regression"
+repository = "https://github.com/jzluo/firthmodels-rs"
+license = "MIT"
+keywords = ["firth", "logistic-regression", "cox-regression", "survival-analysis", "statistics"]
+categories = ["science", "mathematics"]
+
+[dependencies]
+faer = { version = "0.24.4", default-features = false, features = ["std"] }
+fearless_simd = "1.2"
+libm = "0.2"
+thiserror = "2.0.20"
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
+
+[lints.rust]
+unsafe_code = "deny"
+ambiguous_negative_literals = "warn"
+missing_debug_implementations = "warn"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
+trivial_numeric_casts = "warn"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+inline_always = "allow"
+cast_precision_loss = "allow"
+multiple_crate_versions = "allow"
