@@ -405,6 +405,20 @@ impl CoxFit {
     /// Penalized likelihood ratio test that the coefficients at `indices` are all zero. The test
     /// has `indices.len()` degrees of freedom.
     ///
+    /// The test refits the model with the coefficients at `indices` fixed to zero.
+    ///
+    /// When `warm_start` is false, the other coefficients start at zero.
+    /// When `warm_start` is true, the other coefficients start at their conditional mean given that the
+    /// fixed coefficients are zero. Let `C` be the inverse Fisher information of the full fit,
+    /// returned by [`covariance`](Self::covariance). The conditional mean is computed as if the
+    /// full estimate `beta` were normal with covariance `C`. Let `S` be the positions in `indices`.
+    /// Let `F` be the other positions. The start is then `beta_F - C_FS C_SS^-1 beta_S`. With one
+    /// tested coefficient `j`, each free coefficient `f` starts at `beta_f - beta_j C_fj / C_jj`.
+    ///
+    /// Equivalently, the start is the result of one Newton step from the full estimate with the
+    /// coefficients at `indices` set to zero. The step changes only the other coefficients. It uses
+    /// a quadratic approximation of the penalized log-likelihood around the full estimate.
+    ///
     /// # Errors
     ///
     /// Returns `InvalidInput` if `indices` is empty, repeats an index, or contains an index past
