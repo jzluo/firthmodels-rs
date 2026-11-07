@@ -58,14 +58,27 @@ struct LogisticDesign {
 }
 
 impl LogisticData {
-    /// Checks `features` and copies them into a column-major matrix. When `fit_intercept` is true,
-    /// the matrix has a final column of ones.
+    /// Checks `features` and copies them into a column-major matrix. The matrix has a final column
+    /// of ones for the intercept.
     ///
     /// # Errors
     ///
     /// Returns `InvalidDimensions` for fewer than two rows, or `InvalidInput` if a feature is not
     /// finite.
-    pub fn new(features: MatrixView, fit_intercept: bool) -> Result<Self> {
+    pub fn new(features: MatrixView) -> Result<Self> {
+        Self::from_features(features, true)
+    }
+
+    /// Checks `features` and copies them into a column-major matrix without an intercept column.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`LogisticData::new`].
+    pub fn without_intercept(features: MatrixView) -> Result<Self> {
+        Self::from_features(features, false)
+    }
+
+    fn from_features(features: MatrixView, fit_intercept: bool) -> Result<Self> {
         let nrows = features.nrows();
         let n_features = features.ncols();
         if nrows < 2 {
@@ -304,7 +317,7 @@ impl LogisticFit {
         &self.estimate.beta[..self.data.inner.n_features]
     }
 
-    /// Returns 0.0 if `fit_intercept` is `false`.
+    /// Returns 0.0 if [`LogisticData::without_intercept`] created the data.
     #[must_use]
     pub fn intercept(&self) -> f64 {
         if self.data.inner.fit_intercept {
@@ -1141,7 +1154,7 @@ mod tests {
     }
 
     fn prediction_fit() -> LogisticFit {
-        LogisticData::new(prediction_features(), true)
+        LogisticData::new(prediction_features())
             .unwrap()
             .model(&PREDICTION_RESPONSE)
             .offset(&PREDICTION_OFFSET)
