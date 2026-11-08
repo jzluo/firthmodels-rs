@@ -382,13 +382,27 @@ impl LogisticFit {
     /// of `indices` are positions in [`parameters`](Self::parameters). The test has `indices.len()`
     /// degrees of freedom.
     ///
+    /// The test refits the model with the parameters at `indices` fixed to zero.
+    ///
+    /// When `warm_start` is false, the other parameters start at zero.
+    /// When `warm_start` is true, the other parameters start at their conditional mean given that the fixed
+    /// parameters are zero. Let `C` be the inverse Fisher information of the full fit, which is
+    /// returned by [`covariance`](Self::covariance). The conditional mean is computed as if
+    /// the full estimate `beta` were normal with covariance `C`. Let `S` be the positions in `indices`.
+    /// Let `F` be the other positions. The start is then `beta_F - C_FS C_SS^-1 beta_S`. With one
+    /// tested parameter `j`, each free parameter `f` starts at `beta_f - beta_j C_fj / C_jj`.
+    ///
+    /// Equivalently, the start is the result of one Newton step from the full estimate with the
+    /// parameters at `indices` set to zero. The step changes only the other parameters. It uses a
+    /// quadratic approximation of the penalized log-likelihood around the full estimate.
+    ///
     /// # Errors
     ///
     /// Returns `InvalidInput` if `indices` is empty, repeats an index, or contains an index past
     /// the last parameter. Returns `RankDeficient` or `IllConditionedDesign` if the conditioning
     /// check of the design fails during the constrained fit. This method does not return an error
-    /// when the full or constrained fit does not converge; the returned `LrtResult` would have
-    /// status `FullFitNonconvergence` or `ConstrainedFitNonconvergence`.
+    /// when the full or constrained fit does not converge. The returned `LrtResult` then has status
+    /// `FullFitNonconvergence` or `ConstrainedFitNonconvergence`.
     pub fn likelihood_ratio_test(&self, indices: &[usize], warm_start: bool) -> Result<LrtResult> {
         // The objective allocates buffers for every row. A test of a fit that did not converge never
         // evaluates it.

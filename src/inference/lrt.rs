@@ -169,8 +169,9 @@ impl Estimate {
 }
 
 /// Computes warm-start values for the free coefficients of a constrained fit that fixes the
-/// coefficients at `fixed` to zero. The values are `beta_F - Sigma_FS Sigma_SS^-1 beta_S`, the
-/// conditional mean of the free coefficients under the full fit's covariance `Sigma`.
+/// coefficients at `fixed` to zero. The values are `beta_F - C_FS C_SS^-1 beta_S`, the conditional
+/// mean of the free coefficients under the full fit's covariance `C`. The values maximize the quadratic approximation
+/// around `beta` with curvature `C^-1` when the coefficients at `fixed` are zero.
 fn constrained_warm_start(
     beta: &[f64],
     covariance: Option<&[f64]>,
