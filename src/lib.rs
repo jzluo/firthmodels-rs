@@ -4,6 +4,10 @@
 //! later. By default, rustc records macOS 11.0 as the minimum version of a program. Set
 //! `MACOSX_DEPLOYMENT_TARGET` to 13.3 or later when you build a program to run on other Macs.
 
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
+
 #[cfg(accelerate)]
 mod accelerate;
 mod cox;
