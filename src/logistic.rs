@@ -128,14 +128,41 @@ impl LogisticData {
             options: LogisticOptions::default(),
         }
     }
+
+    /// Returns a copy of the features in column-major order.
+    #[must_use]
+    pub fn features_column_major(&self) -> Vec<f64> {
+        let mut features = Vec::with_capacity(self.nrows() * self.n_features());
+        for j in 0..self.n_features() {
+            features.extend_from_slice(self.inner.design.col_as_slice(j));
+        }
+        features
+    }
+
+    #[must_use]
+    pub fn nrows(&self) -> usize {
+        self.inner.design.nrows()
+    }
+
+    /// Returns the number of feature columns, not including the intercept.
+    #[must_use]
+    pub fn n_features(&self) -> usize {
+        self.inner.n_features
+    }
+
+    /// Returns false if [`LogisticData::without_intercept`] created the data.
+    #[must_use]
+    pub fn has_intercept(&self) -> bool {
+        self.inner.fit_intercept
+    }
 }
 
 // A derived `Debug` implementation would print every entry of the design.
 impl fmt::Debug for LogisticData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LogisticData")
-            .field("nrows", &self.inner.design.nrows())
-            .field("n_features", &self.inner.n_features)
+            .field("nrows", &self.nrows())
+            .field("n_features", &self.n_features())
             .field("fit_intercept", &self.inner.fit_intercept)
             .finish_non_exhaustive()
     }
@@ -303,6 +330,36 @@ impl LogisticFit {
             self.options.penalty_weight,
             &self.design_checked,
         )
+    }
+
+    /// Returns the feature matrix of the fit. A caller can store this along with
+    /// [`response`](Self::response), [`sample_weight`](Self::sample_weight),
+    /// [`offset`](Self::offset), and [`options`](Self::options) to rebuild the fit later.
+    #[must_use]
+    pub fn data(&self) -> &LogisticData {
+        &self.data
+    }
+
+    #[must_use]
+    pub fn response(&self) -> &[f64] {
+        &self.response
+    }
+
+    /// Returns unit weights if the model had no sample weights.
+    #[must_use]
+    pub fn sample_weight(&self) -> &[f64] {
+        &self.sample_weight
+    }
+
+    /// Returns zero offsets if the model had no offsets.
+    #[must_use]
+    pub fn offset(&self) -> &[f64] {
+        &self.offset
+    }
+
+    #[must_use]
+    pub fn options(&self) -> LogisticOptions {
+        self.options
     }
 
     /// Feature coefficients, followed by the intercept if present.
