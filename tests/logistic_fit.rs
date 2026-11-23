@@ -1070,3 +1070,47 @@ fn fitted_probabilities_near_one_converge() {
         }
     }
 }
+
+#[test]
+fn refit_from_fit_inputs_matches_fit() {
+    let n = separation::N;
+    let weights: Vec<f64> = (0..n).map(|i| [1.0, 2.0, 0.0][i % 3]).collect();
+    let offset: Vec<f64> = (0..n).map(|i| 0.01 * i as f64).collect();
+    let options = LogisticOptions {
+        penalty_weight: 0.25,
+        ..LogisticOptions::default()
+    };
+    for data in [
+        LogisticData::new(features()).unwrap(),
+        LogisticData::without_intercept(features()).unwrap(),
+    ] {
+        let fit = data
+            .model(separation::Y)
+            .sample_weight(&weights)
+            .offset(&offset)
+            .options(options)
+            .fit()
+            .unwrap();
+
+        let features = fit.data().features_column_major();
+        let view =
+            MatrixView::from_column_major(&features, fit.data().nrows(), fit.data().n_features())
+                .unwrap();
+        let rebuilt = if fit.data().has_intercept() {
+            LogisticData::new(view)
+        } else {
+            LogisticData::without_intercept(view)
+        }
+        .unwrap();
+        let refit = rebuilt
+            .model(fit.response())
+            .sample_weight(fit.sample_weight())
+            .offset(fit.offset())
+            .options(fit.options())
+            .fit()
+            .unwrap();
+
+        assert_eq!(fit.status(), FitStatus::Converged);
+        assert_close(refit.parameters(), fit.parameters(), 1e-12);
+    }
+}

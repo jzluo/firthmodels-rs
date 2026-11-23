@@ -67,6 +67,10 @@ impl Default for CoxOptions {
 /// Survival data for Cox regression, sorted and grouped once. Every model from
 /// [`model`](Self::model) reuses the sorted data.
 ///
+/// `CoxData` does not store the rows censored before the earliest event time, because they are in
+/// no risk set. It stores the other rows sorted by descending time, and tied rows stay in input
+/// order. The accessors return values for these stored rows only.
+///
 /// Clones share one copy of the data.
 #[derive(Clone)]
 pub struct CoxData {
@@ -101,6 +105,42 @@ impl CoxData {
             offset: None,
             options: CoxOptions::default(),
         }
+    }
+
+    /// Returns the features of the stored rows as a new row-major vector. `CoxData` stores each
+    /// feature minus the center of its column, and this method adds the center back. A returned
+    /// value can therefore differ from the input value by the rounding error of that subtraction.
+    #[must_use]
+    pub fn features_row_major(&self) -> Vec<f64> {
+        let data = &self.inner;
+        data.x
+            .iter()
+            .zip(data.feature_centers.iter().cycle())
+            .map(|(&centered, &center)| centered + center)
+            .collect()
+    }
+
+    /// Returns the number of stored rows.
+    #[must_use]
+    pub fn nrows(&self) -> usize {
+        self.inner.n_samples()
+    }
+
+    #[must_use]
+    pub fn n_features(&self) -> usize {
+        self.inner.n_features()
+    }
+
+    /// Returns the times of the stored rows.
+    #[must_use]
+    pub fn time(&self) -> &[f64] {
+        &self.inner.time
+    }
+
+    /// Returns the event indicators of the stored rows.
+    #[must_use]
+    pub fn event(&self) -> &[bool] {
+        &self.inner.event
     }
 }
 
@@ -240,6 +280,35 @@ impl CoxFit {
         CoxObjective::new(&self.data.inner, &self.inputs, self.options.penalty_weight)
     }
 
+    /// Returns the data of the fit. To rebuild the fit later, create a new `CoxData` from the
+    /// stored rows of this data, and fit its model with [`sample_weight`](Self::sample_weight),
+    /// [`offset`](Self::offset), and [`options`](Self::options). The refit gives the same
+    /// coefficients up to rounding. The weights and offsets have one value per stored row. Do not
+    /// pass them to the model of this data, which takes one value per input row.
+    #[must_use]
+    pub fn data(&self) -> &CoxData {
+        &self.data
+    }
+
+    /// Returns the weight of each stored row of [`data`](Self::data), or `None` if the model had no
+    /// sample weights.
+    #[must_use]
+    pub fn sample_weight(&self) -> Option<&[f64]> {
+        self.inputs.sample_weight.as_deref()
+    }
+
+    /// Returns the offset of each stored row of [`data`](Self::data), or `None` if the model had no
+    /// offsets.
+    #[must_use]
+    pub fn offset(&self) -> Option<&[f64]> {
+        self.inputs.offset.as_deref()
+    }
+
+    #[must_use]
+    pub fn options(&self) -> CoxOptions {
+        self.options
+    }
+
     #[must_use]
     pub fn coefficients(&self) -> &[f64] {
         &self.estimate.beta
@@ -297,6 +366,13 @@ impl CoxFit {
     #[must_use]
     pub fn cumulative_baseline_hazard(&self) -> &[f64] {
         &self.cumulative_baseline_hazard
+    }
+
+    /// Returns the natural logs of [`cumulative_baseline_hazard`](Self::cumulative_baseline_hazard).
+    /// The logs stay finite when the hazard underflows to zero or overflows to infinity.
+    #[must_use]
+    pub fn log_cumulative_baseline_hazard(&self) -> &[f64] {
+        &self.log_cumulative_baseline_hazard
     }
 
     /// Baseline survival function `exp(-cumulative_baseline_hazard)` at each unique event time.
@@ -757,6 +833,10 @@ impl CoxPrecomputed {
 
 /// Weights, offsets, and weighted event sums for one fit.
 struct CaseInputs {
+    /// The weight of each sorted sample, or `None` when the fit has no weights.
+    sample_weight: Option<Vec<f64>>,
+    /// The offset of each sorted sample, or `None` when the fit has no offsets.
+    offset: Option<Vec<f64>>,
     /// `offset + ln(weight)` for each sorted sample, or `None` when the fit has neither weights nor
     /// offsets. A zero weight gives negative infinity.
     eta_shift: Option<Vec<f64>>,
@@ -784,18 +864,24 @@ impl CaseInputs {
         if let Some(offset) = offset {
             validate_vector(offset, data.n_input_rows, "offset")?;
         }
+        let sorted =
+            |values: &[f64]| -> Vec<f64> { data.order.iter().map(|&row| values[row]).collect() };
+        let sample_weight = sample_weight.map(sorted);
+        let offset = offset.map(sorted);
         // Constant closures let the compiler drop the row lookups and multiplications from the
         // unweighted sums.
-        let inputs = if sample_weight.is_none() && offset.is_none() {
+        let mut inputs = if sample_weight.is_none() && offset.is_none() {
             Self::with_event_sums(data, None, |_| 1.0, |_| 0.0)
         } else {
-            let weight_at = |i: usize| sample_weight.map_or(1.0, |weight| weight[data.order[i]]);
-            let offset_at = |i: usize| offset.map_or(0.0, |offset| offset[data.order[i]]);
+            let weight_at = |i: usize| sample_weight.as_ref().map_or(1.0, |weight| weight[i]);
+            let offset_at = |i: usize| offset.as_ref().map_or(0.0, |offset| offset[i]);
             let eta_shift = (0..data.n_samples())
                 .map(|i| offset_at(i) + weight_at(i).ln())
                 .collect();
             Self::with_event_sums(data, Some(eta_shift), weight_at, offset_at)
         };
+        inputs.sample_weight = sample_weight;
+        inputs.offset = offset;
         if inputs.n_event_blocks == 0 {
             return Err(Error::InvalidInput(
                 "at least one positive-weight event is required".into(),
@@ -831,6 +917,8 @@ impl CaseInputs {
         }
         let n_event_blocks = event_weights.iter().filter(|&&weight| weight > 0.0).count();
         Self {
+            sample_weight: None,
+            offset: None,
             eta_shift,
             event_weights,
             event_feature_totals,
