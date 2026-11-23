@@ -486,10 +486,10 @@ impl LogisticFit {
     /// # Errors
     ///
     /// Returns `InvalidInput` if `index`, `alpha`, or a field of `options` is out of range. Returns
-    /// a numerical error if a solve fails during root finding. Returns `RankDeficient` or
-    /// `IllConditionedDesign` if the conditioning check of the design fails at an evaluation. When
-    /// the fit or the profile iteration does not converge, this method returns a `ProfileBound`
-    /// with status `FullFitNonconvergence` or `ProfileBoundNonconvergence`.
+    /// `RankDeficient` or `IllConditionedDesign` if the conditioning check of the design fails at
+    /// an evaluation. This method does not return an error when the fit or the profile iteration
+    /// does not converge, or when an evaluation or a linear solve fails for another reason. The
+    /// returned `ProfileBound` then has a status other than `Valid`.
     pub fn profile_confidence_bound(
         &self,
         index: usize,
@@ -498,12 +498,17 @@ impl LogisticFit {
         options: ProfileOptions,
     ) -> Result<ProfileBound> {
         let mut objective = None;
-        self.estimate
+        let bound = self
+            .estimate
             .profile_bound(index, tail, alpha, options, |beta| {
                 objective
                     .get_or_insert_with(|| self.objective())
                     .evaluate(beta)
-            })
+            })?;
+        if let Some(objective) = &objective {
+            objective.design_check.failure()?;
+        }
+        Ok(bound)
     }
 
     /// Returns both profile-likelihood confidence bounds for a parameter as `[lower, upper]`.
@@ -518,12 +523,17 @@ impl LogisticFit {
         options: ProfileOptions,
     ) -> Result<[ProfileBound; 2]> {
         let mut objective = None;
-        self.estimate
+        let bounds = self
+            .estimate
             .profile_interval(index, alpha, options, |beta| {
                 objective
                     .get_or_insert_with(|| self.objective())
                     .evaluate(beta)
-            })
+            })?;
+        if let Some(objective) = &objective {
+            objective.design_check.failure()?;
+        }
+        Ok(bounds)
     }
 
     /// Computes the log-odds `X @ coefficients + intercept + offset` for each row.

@@ -2,8 +2,8 @@
 //! `<https://github.com/jzluo/firthmodels/blob/60af10d/tests/test_cox.py>`.
 
 use firthmodels::{
-    CoxData, CoxFit, CoxOptions, Error, FitStatus, MatrixView, ProfileOptions, Tail,
-    concordance_index,
+    CoxData, CoxFit, CoxOptions, Error, FitStatus, InferenceStatus, MatrixView, ProfileOptions,
+    Tail, concordance_index,
 };
 use proptest::prelude::*;
 
@@ -780,4 +780,46 @@ fn refit_from_fit_inputs_matches_fit() {
             1e-12,
         );
     }
+}
+
+#[test]
+fn profile_interval_reports_failed_evaluation_as_nonconvergence() {
+    // The second run of the upper bound for the second coefficient reaches a point where the
+    // information is numerically singular, so the evaluation there fails.
+    #[rustfmt::skip]
+    let x = [
+        -0.85, 0.39, 0.69,
+        0.86, -0.85, -1.4,
+        -0.79, 0.12, 0.11,
+        -1.1, 0.59, 0.42,
+        0.63, 0.095, 2.4,
+        0.15, -1.5, -0.75,
+        -1.4, -1.6, -0.36,
+        -1.9, 0.65, -0.59,
+        -0.19, 0.74, 0.054,
+        0.0089, -0.93, -0.97,
+        -0.39, -0.93, 0.75,
+        -0.73, 1.6, 1.2,
+        0.46, -1.6, -0.91,
+    ];
+    let time = [
+        0.84, 0.027, 0.18, 2.6, 1.2, 1.4, 0.31, 2.1, 0.046, 0.19, 1.1, 2.7, 1.1,
+    ];
+    let event = [
+        false, true, true, false, false, false, false, false, true, false, false, true, false,
+    ];
+    let features = MatrixView::from_row_major(&x, 13, 3).unwrap();
+    let fit = CoxData::new(features, &time, &event)
+        .unwrap()
+        .model()
+        .fit()
+        .unwrap();
+    assert_eq!(fit.status(), FitStatus::Converged);
+
+    let [lower, upper] = fit
+        .profile_confidence_interval(1, 0.05, ProfileOptions::default())
+        .unwrap();
+    assert!(lower.is_valid(), "status {:?}", lower.status());
+    assert_eq!(upper.status(), InferenceStatus::ProfileBoundNonconvergence);
+    assert!(upper.bound().is_nan());
 }

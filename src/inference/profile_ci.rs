@@ -199,6 +199,14 @@ impl Estimate {
 
         let other_indices: Vec<usize> = (0..k).filter(|&j| j != index).collect();
 
+        let nonconvergence = |iterations: usize| {
+            ProfileBound::invalid(
+                InferenceStatus::ProfileBoundNonconvergence,
+                None,
+                iterations,
+            )
+        };
+
         // Appendix step 2: compute dw/dbeta and h
         let (dw_db, d2l_db2) = if other_indices.is_empty() {
             // Single parameter case
@@ -212,7 +220,9 @@ impl Estimate {
             let d0_bw = Col::from_fn(k - 1, |i| d0[(index, other_indices[i])]);
 
             // dw/dbeta = -(d2l/dw2)^-1 (d2l/dbeta*dw)  (Eq. 5)
-            let solution = solve_with_fallback(&d0_ww, d0_bw.as_mat())?;
+            let Ok(solution) = solve_with_fallback(&d0_ww, d0_bw.as_mat()) else {
+                return Ok(nonconvergence(0));
+            };
             let dw_db: Vec<f64> = solution.col(0).iter().map(|value| -value).collect();
 
             // d2l_bar/dbeta2 = D_bb - D_bw D_ww^-1 D_wb (Eq. 6 denominator)
@@ -255,33 +265,30 @@ impl Estimate {
         // other tail.
         let on_requested_side = |value: f64| tail.sign() * (value - theta_hat[index]) > 0.0;
 
-        let nonconvergence = |iterations: usize| {
-            ProfileBound::invalid(
-                InferenceStatus::ProfileBoundNonconvergence,
-                None,
-                iterations,
-            )
-        };
-
         // `iterate` runs the modified Newton-Raphson iteration of appendix steps 4-9 from `theta`.
-        // When `abandon` is true, `iterate` stops at the first failed evaluation or damped step. It
-        // then returns a nonconvergence result.
-        let mut iterate = |mut theta: Vec<f64>, abandon: bool| -> Result<ProfileBound> {
+        // A failed solve for the step ends the run with a nonconvergence result. When `abandon` is
+        // true, a failed evaluation or a damped step also ends the run with a nonconvergence
+        // result. When `abandon` is false, non-finite quantities end the run with
+        // `NonFiniteLikelihood`, and any other evaluation error ends the run with a nonconvergence
+        // result.
+        let mut iterate = |mut theta: Vec<f64>, abandon: bool| -> ProfileBound {
             for iteration in 0..=max_iterations {
                 // Appendix step 4: compute score and Hessian at theta(i)
                 let quantities = match compute_quantities(&theta) {
                     Ok(quantities) if finite(&quantities) => quantities,
-                    _ if abandon => return Ok(nonconvergence(iteration)),
+                    _ if abandon => return nonconvergence(iteration),
                     // The iteration cannot compute a valid bound or a next step from non-finite
                     // quantities.
                     Ok(_) | Err(Error::NonFinite) => {
-                        return Ok(ProfileBound::invalid(
+                        return ProfileBound::invalid(
                             InferenceStatus::NonFiniteLikelihood,
                             None,
                             iteration,
-                        ));
+                        );
                     },
-                    Err(error) => return Err(error),
+                    // A diverged iteration reaches points where the information is numerically
+                    // singular, and the evaluation returns an error there.
+                    Err(_) => return nonconvergence(iteration),
                 };
 
                 // Appendix step 5: F = [l - l*, dl/dw]' (Eq. 2)
@@ -297,18 +304,18 @@ impl Estimate {
                     .fold(0.0_f64, |acc, value| acc.max(value.abs()));
                 if max_abs <= tolerance && !quantities.step_matrix_cancelled() {
                     if !on_requested_side(theta[index]) {
-                        return Ok(ProfileBound::invalid(
+                        return ProfileBound::invalid(
                             InferenceStatus::ProfileBoundWrongSide,
                             None,
                             iteration,
-                        ));
+                        );
                     }
-                    return Ok(ProfileBound {
+                    return ProfileBound {
                         bound: theta[index],
                         status: InferenceStatus::Valid,
                         iterations: iteration,
                         fit_status: None,
-                    });
+                    };
                 }
                 if iteration == max_iterations {
                     break;
@@ -330,7 +337,9 @@ impl Estimate {
                 let mut rhs = Mat::zeros(k, 2);
                 rhs.col_mut(0).copy_from(ColRef::from_slice(&equations));
                 rhs[(index, 1)] = 1.0;
-                let solution = solve_with_fallback(&jacobian, rhs.as_ref())?;
+                let Ok(solution) = solve_with_fallback(&jacobian, rhs.as_ref()) else {
+                    return nonconvergence(iteration);
+                };
                 let (v, g_j) = (solution.col(0), solution.col(1));
 
                 // Appendix step 7: quadratic correction
@@ -354,7 +363,7 @@ impl Estimate {
                     let norm2 = quadratic_form(step2.as_ref(), information, step2.as_ref());
                     if norm1 < norm2 { step1 } else { step2 }
                 } else if abandon {
-                    return Ok(nonconvergence(iteration));
+                    return nonconvergence(iteration);
                 } else {
                     // When Eq. 8 has no real root or `a` is near zero, the damped step is
                     // `-0.1 * v` (pg 92).
@@ -369,28 +378,28 @@ impl Estimate {
 
             // The iteration did not converge within `max_iterations` iterations.
             if !on_requested_side(theta[index]) {
-                return Ok(ProfileBound::invalid(
+                return ProfileBound::invalid(
                     InferenceStatus::ProfileBoundWrongSide,
                     None,
                     max_iterations,
-                ));
+                );
             }
-            Ok(nonconvergence(max_iterations))
+            nonconvergence(max_iterations)
         };
 
         // The step size h from Eq. 6 is half the distance from the estimate to the point where the
         // quadratic approximation of the profile log-likelihood equals l_star. That distance is |z|
         // times the Wald standard error, sqrt([I^-1]_bb), because -d2l_db2 is 1 / [I^-1]_bb. At
         // start(2h), beta equals the Wald bound. The first run starts at start(2h) unless h is the
-        // fallback above. If the first run reaches a valid bound without a failed evaluation or a
-        // damped step, `profile_bound` returns that bound. Otherwise a second run starts at
-        // start(h). The iteration count of the second run starts at zero.
+        // fallback above. If the first run reaches a valid bound without a failed evaluation, a
+        // failed solve, or a damped step, `profile_bound` returns that bound. Otherwise a second
+        // run starts at start(h). The iteration count of the second run starts at zero.
         if d2l_db2 < 0.0 {
-            let bound = iterate(start(2.0 * h), true)?;
+            let bound = iterate(start(2.0 * h), true);
             if bound.is_valid() {
                 return Ok(bound);
             }
         }
-        iterate(start(h), false)
+        Ok(iterate(start(h), false))
     }
 }
