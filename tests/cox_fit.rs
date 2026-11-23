@@ -718,3 +718,66 @@ fn fit_rejects_bad_inputs() {
         Err(Error::InvalidInput(_))
     ));
 }
+
+#[test]
+fn refit_from_fit_inputs_matches_fit() {
+    let mut x = Vec::new();
+    let mut time = Vec::new();
+    let mut event = Vec::new();
+    for i in 0..60 {
+        let value = f64::from(i);
+        x.extend([value.sin(), (value * 0.3).cos() + 2.0]);
+        // Every third time is tied with the next one.
+        time.push(f64::from(i - i % 3 / 2) + 1.0);
+        event.push(i % 4 != 1);
+    }
+    // These rows are censored before the earliest event, so `CoxData` does not store them.
+    for i in 0..5 {
+        x.extend([f64::from(i), -1.0]);
+        time.push(0.5);
+        event.push(false);
+    }
+    let n = time.len();
+    let weights: Vec<f64> = (0..n).map(|i| [1.0, 2.0, 0.0, 0.5][i % 4]).collect();
+    let offset: Vec<f64> = (0..n).map(|i| 0.02 * (i % 5) as f64).collect();
+    let options = CoxOptions {
+        penalty_weight: 0.25,
+        ..CoxOptions::default()
+    };
+    let view = MatrixView::from_row_major(&x, n, 2).unwrap();
+    let data = CoxData::new(view, &time, &event).unwrap();
+    assert_eq!(data.nrows(), 60);
+
+    for weighted in [false, true] {
+        let mut model = data.model().options(options);
+        if weighted {
+            model = model.sample_weight(&weights).offset(&offset);
+        }
+        let fit = model.fit().unwrap();
+        assert_eq!(fit.status(), FitStatus::Converged);
+
+        let stored = fit.data();
+        let features = stored.features_row_major();
+        let view =
+            MatrixView::from_row_major(&features, stored.nrows(), stored.n_features()).unwrap();
+        let rebuilt = CoxData::new(view, stored.time(), stored.event()).unwrap();
+        let mut model = rebuilt.model().options(fit.options());
+        if let Some(sample_weight) = fit.sample_weight() {
+            model = model.sample_weight(sample_weight);
+        }
+        if let Some(offset) = fit.offset() {
+            model = model.offset(offset);
+        }
+        let refit = model.fit().unwrap();
+
+        assert_eq!(fit.sample_weight().is_some(), weighted);
+        assert_close(refit.coefficients(), fit.coefficients(), 1e-12);
+        assert_close(&[refit.log_likelihood()], &[fit.log_likelihood()], 1e-12);
+        assert_close(refit.standard_errors(), fit.standard_errors(), 1e-12);
+        assert_close(
+            refit.cumulative_baseline_hazard(),
+            fit.cumulative_baseline_hazard(),
+            1e-12,
+        );
+    }
+}
