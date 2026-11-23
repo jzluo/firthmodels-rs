@@ -25,7 +25,8 @@ pub enum InferenceStatus {
     /// A log-likelihood was non-finite. A profile bound also has this status when the score or the
     /// step matrix at an iterate is non-finite.
     NonFiniteLikelihood,
-    /// The profile iteration did not converge within the iteration limit.
+    /// The profile iteration did not converge within the iteration limit. A bound also has this
+    /// status when a linear solve fails or an evaluation returns an error other than `NonFinite`.
     ProfileBoundNonconvergence,
     /// The profile iteration ended on the other side of the estimate.
     ProfileBoundWrongSide,

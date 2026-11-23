@@ -9,8 +9,8 @@
 //! gconv = 1e-12))`.
 
 use firthmodels::{
-    Error, FitStatus, InferenceStatus, LogisticData, LogisticOptions, MatrixView, NewtonOptions,
-    ProfileOptions, Tail,
+    Error, FitStatus, InferenceStatus, LogisticData, LogisticFit, LogisticOptions, MatrixView,
+    NewtonOptions, ProfileOptions, Tail,
 };
 
 #[path = "fixtures/logistic_separation.rs"]
@@ -553,16 +553,10 @@ fn lrt_on_a_nonconverged_fit_is_invalid_without_error() {
     assert!(lrt.p_value().is_nan());
 }
 
-#[test]
-fn lrt_design_check_failure_affects_only_that_test() {
-    // Both features of row 0 are 1e9. The scaled design is therefore ill-conditioned. In the full
-    // fit, the first step moves the linear predictor of row 0 from -50 to above 1e8. Because row 0
-    // has zero weight at that iterate and at every later one, the design check never runs in the
-    // full fit. In the refit with the second coefficient at zero, the linear predictor of row 0 is
-    // positive only when the first coefficient is above 5e-8. Without row 0, the estimate of the
-    // first coefficient is negative. That refit reaches a point where the linear predictor of row 0
-    // is near 3. Because the weight of row 0 dominates the information there, the design check runs
-    // at that point. The check returns `IllConditionedDesign`.
+/// Both features of row 0 are 1e9. The scaled design is therefore ill-conditioned. In the full fit,
+/// the first step moves the linear predictor of row 0 from -50 to above 1e8. Because row 0 has zero
+/// weight at that iterate and at every later one, the design check never runs in the full fit.
+fn ill_conditioned_row_fit() -> LogisticFit {
     let x = [
         1e9, 1e9, //
         -2.0, 2.0, //
@@ -579,11 +573,39 @@ fn lrt_design_check_failure_affects_only_that_test() {
         .fit()
         .unwrap();
     assert!(fit.status().is_converged());
+    fit
+}
+
+#[test]
+fn lrt_design_check_failure_affects_only_that_test() {
+    // In the refit with the second coefficient at zero, the linear predictor of row 0 is positive
+    // only when the first coefficient is above 5e-8. Without row 0, the estimate of the first
+    // coefficient is negative. That refit reaches a point where the linear predictor of row 0 is
+    // near 3. Because the weight of row 0 dominates the information there, the design check runs at
+    // that point. The check returns `IllConditionedDesign`.
+    let fit = ill_conditioned_row_fit();
     assert_eq!(
         fit.likelihood_ratio_test(&[1], false).unwrap_err(),
         Error::IllConditionedDesign
     );
     assert!(fit.likelihood_ratio_test(&[0], false).unwrap().is_valid());
+}
+
+#[test]
+fn profile_bounds_return_design_check_failure() {
+    // The iteration for the lower bound of the first coefficient reaches a point where the design
+    // check runs and returns `IllConditionedDesign`.
+    let fit = ill_conditioned_row_fit();
+    assert_eq!(
+        fit.profile_confidence_bound(0, Tail::Lower, 0.05, PROFILE)
+            .unwrap_err(),
+        Error::IllConditionedDesign
+    );
+    assert_eq!(
+        fit.profile_confidence_interval(0, 0.05, PROFILE)
+            .unwrap_err(),
+        Error::IllConditionedDesign
+    );
 }
 
 #[test]

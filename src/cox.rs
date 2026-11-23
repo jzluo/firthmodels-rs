@@ -514,10 +514,10 @@ impl CoxFit {
     ///
     /// # Errors
     ///
-    /// Returns `InvalidInput` if `index`, `alpha`, or a field of `options` is out of range. Returns
-    /// a numerical error if a solve fails during root finding. When the fit or the profile
-    /// iteration does not converge, this method returns a `ProfileBound` with status
-    /// `FullFitNonconvergence` or `ProfileBoundNonconvergence`.
+    /// Returns `InvalidInput` if `index`, `alpha`, or a field of `options` is out of range. This
+    /// method does not return an error when the fit or the profile iteration does not converge, or
+    /// when an evaluation or a linear solve fails. The returned `ProfileBound` then has a status
+    /// other than `Valid`.
     pub fn profile_confidence_bound(
         &self,
         index: usize,
