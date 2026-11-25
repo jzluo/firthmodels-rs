@@ -752,8 +752,7 @@ fn row_dot_products(left: MatRef<f64>, right: MatRef<f64>, values: &mut [f64]) {
     }
 }
 
-// The product buffer has the layout of `x`. The dot products therefore read the product and `x` in
-// memory order.
+// The product buffer matches the layout of `x`, so the dot products read both in memory order.
 #[cfg(accelerate)]
 fn quadratic_form_rows_accelerate(
     x: MatRef<f64>,
@@ -956,9 +955,9 @@ mod tests {
 
     #[test]
     fn weighted_gram_matches_explicit_product() {
-        // The first case has more than `ROW_CHUNK` rows. The second case has more than
-        // `ACCELERATE_GRAM_CHUNK` rows. In the second case, n and k are odd. On Apple silicon,
-        // `pack_scaled_rows` therefore packs the last sample and the last column with scalar code.
+        // The first case exceeds `ROW_CHUNK` rows and the second exceeds `ACCELERATE_GRAM_CHUNK`
+        // rows. With odd n and k in the second case, `pack_scaled_rows` on Apple silicon exercises
+        // its scalar tail for both the final sample and the final column.
         for (n, k) in [(300, 3), (20_001, 11)] {
             let x = Mat::from_fn(n, k, |i, j| ((7 * i + 3 * j) % 13) as f64 - 6.0);
             let row_major: Vec<f64> = (0..n * k).map(|idx| x[(idx / k, idx % k)]).collect();

@@ -19,9 +19,15 @@ use crate::validation::{
 };
 use crate::{Error, MatrixView, Result};
 
+/// Options for fitting a logistic regression model.
+///
+/// The [`Default`] implementation uses Firth's penalty (`penalty_weight = 0.5`) with
+/// `max_iterations = 25`, `max_step = 5.0`, `max_half_steps = 25`,
+/// `gradient_tolerance = 1e-4`, and `step_tolerance = 1e-4`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LogisticOptions {
-    /// Weight of the penalty term. The standard Firth weight is 0.5.
+    /// Weight of the Jeffreys-prior penalty term. Defaults to `0.5` for Firth's penalty; set to
+    /// `0.0` for an unpenalized maximum likelihood fit.
     pub penalty_weight: f64,
     pub solver: NewtonOptions,
 }
@@ -41,10 +47,10 @@ impl Default for LogisticOptions {
     }
 }
 
-/// A logistic regression design, checked and copied once. Every model from
-/// [`model`](Self::model) reuses the copy.
+/// Prepared feature matrix for logistic regression, validated and stored once for reuse across
+/// [`model`](Self::model) calls.
 ///
-/// Clones share one copy of the design.
+/// Cloning is cheap and shares the underlying design matrix.
 #[derive(Clone)]
 pub struct LogisticData {
     inner: Arc<LogisticDesign>,
@@ -58,18 +64,19 @@ struct LogisticDesign {
 }
 
 impl LogisticData {
-    /// Checks `features` and copies them into a column-major matrix. The matrix has a final column
-    /// of ones for the intercept.
+    /// Validates `features` and copies them into a column-major design matrix with a trailing
+    /// intercept column of ones.
     ///
     /// # Errors
     ///
-    /// Returns `InvalidDimensions` for fewer than two rows, or `InvalidInput` if a feature is not
-    /// finite.
+    /// Returns [`Error::InvalidDimensions`] if there are fewer than two rows, or
+    /// [`Error::InvalidInput`] if any feature is not finite.
     pub fn new(features: MatrixView) -> Result<Self> {
         Self::from_features(features, true)
     }
 
-    /// Checks `features` and copies them into a column-major matrix without an intercept column.
+    /// Validates `features` and copies them into a column-major design matrix without an intercept
+    /// column.
     ///
     /// # Errors
     ///
@@ -116,9 +123,11 @@ impl LogisticData {
         })
     }
 
-    /// Returns the logistic regression of `response` on this design. The model has unit weights,
-    /// zero offsets, and default options until [`sample_weight`](LogisticModel::sample_weight),
-    /// [`offset`](LogisticModel::offset), or [`options`](LogisticModel::options) changes them.
+    /// Creates a logistic regression model for `response` (`0.0` or `1.0`) on this design.
+    ///
+    /// Defaults to unit weights, zero offsets, and [`LogisticOptions::default()`]; configure them
+    /// with [`sample_weight`](LogisticModel::sample_weight), [`offset`](LogisticModel::offset),
+    /// and [`options`](LogisticModel::options).
     pub fn model<'a>(&'a self, response: &'a [f64]) -> LogisticModel<'a> {
         LogisticModel {
             data: self,
@@ -150,7 +159,8 @@ impl LogisticData {
         self.inner.n_features
     }
 
-    /// Returns false if [`LogisticData::without_intercept`] created the data.
+    /// Returns `true` if the design includes an intercept column, or `false` if it was created
+    /// with [`LogisticData::without_intercept`].
     #[must_use]
     pub fn has_intercept(&self) -> bool {
         self.inner.fit_intercept
@@ -168,7 +178,7 @@ impl fmt::Debug for LogisticData {
     }
 }
 
-/// A logistic regression model before it is fitted. [`LogisticData::model`] creates the model.
+/// Unfitted logistic regression model created by [`LogisticData::model`].
 #[derive(Clone, Copy)]
 #[must_use = "call `fit` to fit the model"]
 pub struct LogisticModel<'a> {
@@ -180,16 +190,17 @@ pub struct LogisticModel<'a> {
 }
 
 impl<'a> LogisticModel<'a> {
-    /// `sample_weight[i]` is the nonnegative weight of row `i`. Weights are counts. An integer
-    /// weight `m` gives the same estimates, standard errors, likelihood ratio tests, and profile
-    /// intervals as `m` copies of the row. A zero weight gives the same results as removing the
-    /// row.
+    /// Sets nonnegative frequency weights, one per row.
+    ///
+    /// An integer weight `m` produces the same estimates, standard errors, likelihood ratio tests,
+    /// and profile intervals as `m` identical copies of that row, and a weight of `0.0` excludes
+    /// the row.
     pub fn sample_weight(mut self, sample_weight: &'a [f64]) -> Self {
         self.sample_weight = Some(sample_weight);
         self
     }
 
-    /// `offset[i]` is added to the linear predictor of row `i`.
+    /// Sets per-row offsets added to the linear predictor (`X @ beta + offset`).
     pub fn offset(mut self, offset: &'a [f64]) -> Self {
         self.offset = Some(offset);
         self
@@ -200,17 +211,20 @@ impl<'a> LogisticModel<'a> {
         self
     }
 
-    /// Fits the Firth-penalized logistic regression.
+    /// Fits the logistic regression model.
+    ///
+    /// Non-convergence is reported through [`LogisticFit::status`] rather than returned as an
+    /// error.
     ///
     /// # Errors
     ///
-    /// Returns `InvalidDimensions` for mismatched lengths or for fewer positive-weight rows than
-    /// parameters. Returns `InvalidInput` for out-of-range values or options, or when a class has no
-    /// positive-weight row. Returns `RankDeficient` or `IllConditionedDesign` when the fit finds that
-    /// the positive-weight rows of the design are numerically rank deficient or ill-conditioned. The
-    /// fit runs this check only when the information is close to singular. Returns a numerical error
-    /// if a factorization fails at the starting coefficients or while the solver computes a Newton
-    /// step.
+    /// Returns [`Error::InvalidDimensions`] for mismatched lengths or fewer positive-weight rows
+    /// than parameters. Returns [`Error::InvalidInput`] for invalid responses, weights, offsets, or
+    /// options, or when either class (`0.0` or `1.0`) has no positive-weight rows. Returns
+    /// [`Error::RankDeficient`] or [`Error::IllConditionedDesign`] if the positive-weight rows of
+    /// the design are numerically rank deficient or ill-conditioned (checked lazily when the Fisher
+    /// information becomes nearly singular). Returns a numerical error if factorization fails at
+    /// the starting coefficients or while computing a Newton step.
     pub fn fit(self) -> Result<LogisticFit> {
         let Self {
             data,
@@ -294,6 +308,11 @@ impl fmt::Debug for LogisticModel<'_> {
     }
 }
 
+/// Fitted logistic regression model returned by [`LogisticModel::fit`].
+///
+/// Non-converged fits are returned with a non-converged [`status`](Self::status) instead of an
+/// error. When a fit did not converge or the Fisher information is singular,
+/// [`covariance`](Self::covariance) is `None` and Wald standard errors and p-values are `NaN`.
 pub struct LogisticFit {
     estimate: Estimate,
     // Refits for likelihood ratio tests and profile bounds use these fields.
@@ -332,9 +351,9 @@ impl LogisticFit {
         )
     }
 
-    /// Returns the feature matrix of the fit. A caller can store this along with
-    /// [`response`](Self::response), [`sample_weight`](Self::sample_weight),
-    /// [`offset`](Self::offset), and [`options`](Self::options) to rebuild the fit later.
+    /// Returns the prepared design used for this fit. Together with [`response`](Self::response),
+    /// [`sample_weight`](Self::sample_weight), [`offset`](Self::offset), and
+    /// [`options`](Self::options), this is enough to refit the model later.
     #[must_use]
     pub fn data(&self) -> &LogisticData {
         &self.data
@@ -345,13 +364,13 @@ impl LogisticFit {
         &self.response
     }
 
-    /// Returns unit weights if the model had no sample weights.
+    /// Returns the sample weights, or unit weights (`1.0`) if none were set.
     #[must_use]
     pub fn sample_weight(&self) -> &[f64] {
         &self.sample_weight
     }
 
-    /// Returns zero offsets if the model had no offsets.
+    /// Returns the offsets, or zeros (`0.0`) if none were set.
     #[must_use]
     pub fn offset(&self) -> &[f64] {
         &self.offset
@@ -374,7 +393,8 @@ impl LogisticFit {
         &self.estimate.beta[..self.data.inner.n_features]
     }
 
-    /// Returns 0.0 if [`LogisticData::without_intercept`] created the data.
+    /// Fitted intercept, or `0.0` if the data was created with
+    /// [`LogisticData::without_intercept`].
     #[must_use]
     pub fn intercept(&self) -> f64 {
         if self.data.inner.fit_intercept {
@@ -384,6 +404,8 @@ impl LogisticFit {
         }
     }
 
+    /// Penalized log-likelihood at the fitted parameters (equals the unpenalized log-likelihood
+    /// when `penalty_weight` is `0.0`).
     #[must_use]
     pub fn log_likelihood(&self) -> f64 {
         self.estimate.log_likelihood
@@ -404,6 +426,8 @@ impl LogisticFit {
         self.estimate.covariance.as_deref()
     }
 
+    /// Two-sided Wald p-values for all [`parameters`](Self::parameters), or `NaN` if the fit did
+    /// not converge or the Fisher information is singular.
     #[must_use]
     pub fn p_values(&self) -> &[f64] {
         &self.estimate.p_values
@@ -435,34 +459,30 @@ impl LogisticFit {
         self.estimate.wald_confidence_intervals(alpha)
     }
 
-    /// Penalized likelihood ratio test that the parameters at `indices` are all zero. The entries
-    /// of `indices` are positions in [`parameters`](Self::parameters). The test has `indices.len()`
-    /// degrees of freedom.
+    /// Penalized likelihood ratio test that the parameters at `indices` are all zero, with
+    /// `indices.len()` degrees of freedom.
     ///
-    /// The test refits the model with the parameters at `indices` fixed to zero.
+    /// Entries of `indices` are positions in [`parameters`](Self::parameters). The test refits the
+    /// model with those parameters fixed to zero while keeping the full-model penalty term.
     ///
-    /// When `warm_start` is false, the other parameters start at zero.
-    /// When `warm_start` is true, the other parameters start at their conditional mean given that the fixed
-    /// parameters are zero. Let `C` be the inverse Fisher information of the full fit, which is
-    /// returned by [`covariance`](Self::covariance). The conditional mean is computed as if
-    /// the full estimate `beta` were normal with covariance `C`. Let `S` be the positions in `indices`.
-    /// Let `F` be the other positions. The start is then `beta_F - C_FS C_SS^-1 beta_S`. With one
-    /// tested parameter `j`, each free parameter `f` starts at `beta_f - beta_j C_fj / C_jj`.
-    ///
-    /// Equivalently, the start is the result of one Newton step from the full estimate with the
-    /// parameters at `indices` set to zero. The step changes only the other parameters. It uses a
-    /// quadratic approximation of the penalized log-likelihood around the full estimate.
+    /// When `warm_start` is `false`, the free parameters start at zero. When `warm_start` is
+    /// `true`, they start at their conditional mean given that the fixed parameters are zero,
+    /// treating the full estimate `beta` as normal with covariance `C`
+    /// ([`covariance`](Self::covariance)): `beta_F - C_FS C_SS^-1 beta_S`, where `S` is `indices`
+    /// and `F` is the remaining positions. For a single tested parameter `j`, each free parameter
+    /// `f` starts at `beta_f - beta_j C_fj / C_jj`. Equivalently, this is one Newton step from the
+    /// full estimate under a quadratic approximation to the penalized log-likelihood, updating
+    /// only the free parameters after setting `S` to zero.
     ///
     /// # Errors
     ///
-    /// Returns `InvalidInput` if `indices` is empty, repeats an index, or contains an index past
-    /// the last parameter. Returns `RankDeficient` or `IllConditionedDesign` if the conditioning
-    /// check of the design fails during the constrained fit. This method does not return an error
-    /// when the full or constrained fit does not converge. The returned `LrtResult` then has status
-    /// `FullFitNonconvergence` or `ConstrainedFitNonconvergence`.
+    /// Returns [`Error::InvalidInput`] if `indices` is empty, contains duplicates, or has an index
+    /// out of bounds. Returns [`Error::RankDeficient`] or [`Error::IllConditionedDesign`] if the
+    /// design conditioning check fails during the constrained fit. Non-convergence of the full or
+    /// constrained fit is not an error; it is reported via [`LrtResult::status`].
     pub fn likelihood_ratio_test(&self, indices: &[usize], warm_start: bool) -> Result<LrtResult> {
-        // The objective allocates buffers for every row. A test of a fit that did not converge never
-        // evaluates it.
+        // The objective allocates per-row buffers, so defer creation until the full fit is known
+        // to have converged.
         let mut objective = None;
         let result = self.estimate.likelihood_ratio_test(
             indices,
@@ -480,16 +500,16 @@ impl LogisticFit {
         Ok(result)
     }
 
-    /// Computes one bound of a profile-likelihood confidence interval with the Venzon-Moolgavkar
+    /// Computes one bound of a profile-likelihood confidence interval using the Venzon-Moolgavkar
     /// (1988) algorithm.
     ///
     /// # Errors
     ///
-    /// Returns `InvalidInput` if `index`, `alpha`, or a field of `options` is out of range. Returns
-    /// `RankDeficient` or `IllConditionedDesign` if the conditioning check of the design fails at
-    /// an evaluation. This method does not return an error when the fit or the profile iteration
-    /// does not converge, or when an evaluation or a linear solve fails for another reason. The
-    /// returned `ProfileBound` then has a status other than `Valid`.
+    /// Returns [`Error::InvalidInput`] if `index`, `alpha`, or a field of `options` is out of
+    /// range. Returns [`Error::RankDeficient`] or [`Error::IllConditionedDesign`] if the design
+    /// conditioning check fails during evaluation. Non-convergence of the full fit or the profile
+    /// iteration, as well as other evaluation or linear-solve failures, are reported via
+    /// [`ProfileBound::status`] rather than returned as errors.
     pub fn profile_confidence_bound(
         &self,
         index: usize,
@@ -608,8 +628,8 @@ fn check_design_conditioning(
         return Err(Error::RankDeficient { rank, required: k });
     }
 
-    // Forming the Fisher information squares the condition number of the design. The cutoff
-    // therefore uses the square root of `qr_tolerance`.
+    // Forming the Fisher information squares the design's condition number, so use the square root
+    // of `qr_tolerance` as the cutoff.
     let normal_equations_cutoff = qr_tolerance.sqrt() * pivots[0];
     if pivots.iter().any(|&pivot| pivot <= normal_equations_cutoff) {
         return Err(Error::IllConditionedDesign);
@@ -618,13 +638,12 @@ fn check_design_conditioning(
     Ok(())
 }
 
-/// The design conditioning check that one objective runs.
+/// Design conditioning check for a single objective.
 struct DesignCheck<'a> {
-    /// Every objective of one fit uses the same flag.
+    /// Shared across every objective of a fit.
     passed: &'a AtomicBool,
-    /// The error of a failed check. Unlike `passed`, `error` is not shared between objectives. A
-    /// failed check in one likelihood ratio test or profile bound therefore does not change the
-    /// result of a later call on the same fit.
+    /// Error from a failed check. Unlike `passed`, `error` is not shared across objectives, so a
+    /// failure in one LRT or profile bound does not affect later calls on the same fit.
     error: Option<Error>,
 }
 
@@ -637,12 +656,11 @@ impl DesignCheck<'_> {
         result
     }
 
-    /// Returns the error of a failed check.
+    /// Returns the error from a failed check.
     ///
-    /// `evaluate` calls this method first. After a failed check, every later evaluation therefore
-    /// returns the error. When the check fails at a trial step, the solver rejects every halved
-    /// step and returns `StepHalvingFailed`. The function that ran the solver then returns the
-    /// error from this method.
+    /// `evaluate` checks this first, so once a check fails, subsequent evaluations immediately
+    /// return the error. If the check fails at a trial step, the solver rejects every halved step
+    /// and returns `StepHalvingFailed`, and the caller then propagates this error.
     fn failure(&self) -> Result<()> {
         match &self.error {
             Some(error) => Err(error.clone()),
@@ -806,11 +824,10 @@ impl<'a> LogisticObjective<'a> {
         let cholesky_tolerance = (n.max(k) as f64 * f64::EPSILON).sqrt();
 
         if unpenalized {
-            // A rank-deficient design makes the information singular at every beta. Because a
-            // full-rank design can also make the information numerically singular at extreme beta,
-            // only the first evaluation tests the information. Rounding in the information can make
-            // its Cholesky pivot ratio larger than the QR pivot ratio of the design check. The test
-            // therefore uses twice the cutoff of the design check.
+            // A rank-deficient design makes the information singular at every beta, whereas a
+            // full-rank design can still become numerically singular at extreme beta, so only test
+            // on the first evaluation. Rounding in the information can inflate its Cholesky pivot
+            // ratio relative to the design's QR pivot ratio, so use twice the design-check cutoff.
             if first_evaluation
                 && pivoted_cholesky_pivot_ratio(&information) <= 2.0 * cholesky_tolerance
             {
@@ -839,7 +856,7 @@ impl<'a> LogisticObjective<'a> {
                     // The hat diagonal is
                     // `h_i = w_i * x_i @ inv_fisher @ x_i = w_i * |L^-1 x_i|^2`.
                     cholesky.quadratic_form_rows(x_block, h, matrix_scratch);
-                    // Zero-weight rows have `h_i = 0`. `J_S` therefore never augments them.
+                    // Zero-weight rows have `h_i = 0`, so `J_S` never augments them.
                     augmented_count += scale_hat(
                         h,
                         &w[rows.clone()],
@@ -861,8 +878,8 @@ impl<'a> LogisticObjective<'a> {
             Ok(_) | Err(Error::NotPositiveDefinite) => {
                 design_check.run(design, sample_weight)?;
                 let weighted_design = scale_rows_sqrt(design, w);
-                // With a zero limit, `J_S` augments every row with `h_i > 0`. The step matrix of
-                // the QR fallback is therefore `J`.
+                // A zero limit augments every row with `h_i > 0`, making the QR fallback step
+                // matrix `J`.
                 augmentation_limit = 0.0;
                 let log_determinant = pivoted_qr_hat_logdet(&weighted_design, h)?;
                 fill_residual(
@@ -1015,11 +1032,10 @@ fn scale_hat(
 /// row's `sample_weight`.
 const AUGMENTATION_THRESHOLD: f64 = 0.1;
 
-/// `LOGLIK_BLOCK` must be a multiple of every SIMD lane count. With any other value, the last
-/// vector load of a block also reads rows of the next block. The kernels then count those rows
-/// twice. `LOGLIK_BLOCK` must also be at most 1023. The unit-weight kernel multiplies the factors
-/// `1 + z` of all rows in a block. Each factor is at most 2. A product of 1024 factors can
-/// therefore overflow.
+/// `LOGLIK_BLOCK` must be a multiple of every SIMD lane count; otherwise the final vector load of
+/// a block reads into the next block and double-counts rows. It must also be at most 1023, because
+/// the unit-weight kernel multiplies `1 + z` (each at most 2) across a block and 1024 factors
+/// could overflow `f64`.
 const LOGLIK_BLOCK: usize = 64;
 const _: () = assert!(LOGLIK_BLOCK <= 1023);
 
@@ -1098,12 +1114,11 @@ fn expit_loglik_lanes<S: Simd>(
     log_likelihood.total()
 }
 
-/// Computes `expit_loglik` for unit sample weights. The `log1p(z)` terms of a block of rows sum to
-/// `log1p(q)` with `q = prod(1 + z) - 1`. Each block therefore needs one logarithm instead of one
-/// per row. Each lane updates `q` as `q * (1 + z) + z`. Because every term of that update is
-/// nonnegative, `q` keeps its relative accuracy when every `z` is small. A product of rounded
-/// `1 + z` factors would not keep that accuracy, because rounding `1 + z` discards the low bits of
-/// a small `z`.
+/// Computes `expit_loglik` for unit sample weights. The `log1p(z)` terms in a block sum to
+/// `log1p(q)` with `q = prod(1 + z) - 1`, reducing the work to one logarithm per block instead of
+/// one per row. Each lane updates `q` via `q * (1 + z) + z`; because every term is nonnegative,
+/// `q` preserves relative accuracy when all `z` are small, whereas multiplying rounded `1 + z`
+/// factors would lose the low bits of small `z`.
 #[inline(always)]
 fn expit_loglik_unit_lanes<S: Simd>(
     simd: S,
@@ -1381,8 +1396,8 @@ mod tests {
     #[test]
     fn quantities_at_beta_zero_penalized() {
         let quantities = quantities(&[0.0; 4], 0.5, &[0.0, 0.0]);
-        // At beta = 0, every fitted probability is 1/2. The penalty term `2 * tau * h * (0.5 - p)`
-        // is then zero. The modified score therefore equals the unpenalized score `X.T @ (y - p)`.
+        // At beta = 0, every fitted probability is 1/2, so the penalty term
+        // `2 * tau * h * (0.5 - p)` vanishes and the modified score equals `X.T @ (y - p)`.
         assert!((quantities.modified_score[0] - 2.0).abs() < 1e-12);
         assert!(quantities.modified_score[1].abs() < 1e-12);
         let expected_loglik = -4.0 * 2.0_f64.ln() + 0.5 * 1.25_f64.ln();
@@ -1426,10 +1441,9 @@ mod tests {
         let mut reused =
             LogisticObjective::new(&design, &response, &sample_weight, &offset, 1.0, &checked);
 
-        // At beta_0 = 36 and beta_1 = -36, the rows in groups 0 and 1 have weight 2.3e-16. The rows
-        // in group 2 have weight 1/4. Columns 0 and 1 of the weighted design are then nearly equal.
-        // The evaluation therefore falls back to QR. The last evaluation, at beta = 0, uses
-        // Cholesky again.
+        // At beta_0 = 36 and beta_1 = -36, rows in groups 0 and 1 have weight ~2.3e-16 while rows
+        // in group 2 have weight 1/4, making columns 0 and 1 of the weighted design nearly equal
+        // and triggering the QR fallback. The final evaluation at beta = 0 returns to Cholesky.
         for saturation in [0.0, 36.0, 0.0] {
             let mut beta = vec![0.0; k];
             (beta[0], beta[1]) = (saturation, -saturation);

@@ -40,11 +40,15 @@ macro_rules! with_const_k {
     };
 }
 
-/// Options for fitting a Firth-penalized Cox model.
+/// Options for fitting a Cox proportional hazards model.
+///
+/// The [`Default`] implementation uses Firth's penalty (`penalty_weight = 0.5`) with
+/// `max_iterations = 50`, `max_step = 5.0`, `max_half_steps = 5`,
+/// `gradient_tolerance = 1e-4`, and `step_tolerance = 1e-6`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CoxOptions {
-    /// Weight of the penalty term. The standard Firth weight is 0.5. Set to 0.0 for an unpenalized
-    /// Cox partial likelihood fit.
+    /// Weight of the Jeffreys-prior penalty term. Defaults to `0.5` for Firth's penalty; set to
+    /// `0.0` for an unpenalized Cox partial likelihood fit.
     pub penalty_weight: f64,
     pub solver: NewtonOptions,
 }
@@ -64,29 +68,32 @@ impl Default for CoxOptions {
     }
 }
 
-/// Survival data for Cox regression, sorted and grouped once. Every model from
-/// [`model`](Self::model) reuses the sorted data.
+/// Prepared survival data for Cox regression, sorted and grouped once for reuse across
+/// [`model`](Self::model) calls.
 ///
-/// `CoxData` does not store the rows censored before the earliest event time, because they are in
-/// no risk set. It stores the other rows sorted by descending time, and tied rows stay in input
-/// order. The accessors return values for these stored rows only.
+/// Rows censored strictly before the earliest event time are dropped because they do not enter any
+/// risk set. Retained rows are stored in descending time order, preserving input order among ties.
+/// Accessors such as [`nrows`](Self::nrows), [`time`](Self::time), and [`event`](Self::event)
+/// reflect only the retained rows.
 ///
-/// Clones share one copy of the data.
+/// Cloning is cheap and shares the underlying data.
 #[derive(Clone)]
 pub struct CoxData {
     inner: Arc<CoxPrecomputed>,
 }
 
 impl CoxData {
-    /// Checks the data, sorts it by descending time, and groups tied times.
+    /// Validates the data, sorts it by descending time, and groups tied times by exact
+    /// floating-point equality.
     ///
-    /// `time` is the event or censoring time of each sample. `event` is `true` where the event
-    /// occurred and `false` where the sample was censored.
+    /// `time` is the nonnegative event or censoring time for each sample, and `event` is `true`
+    /// for observed events and `false` for right-censored observations.
     ///
     /// # Errors
     ///
-    /// Returns `InvalidDimensions` for fewer than two samples or mismatched lengths, or
-    /// `InvalidInput` for a non-finite feature, a negative or non-finite time, or no events.
+    /// Returns [`Error::InvalidDimensions`] for fewer than two samples or mismatched lengths, or
+    /// [`Error::InvalidInput`] for non-finite features, negative or non-finite times, or data with
+    /// no events.
     pub fn new(features: MatrixView, time: &[f64], event: &[bool]) -> Result<Self> {
         validate_finite_features(features)?;
         validate_survival_data(features.nrows(), event, time)?;
@@ -95,9 +102,11 @@ impl CoxData {
         })
     }
 
-    /// Returns the Cox model of this data. The model has unit weights, zero offsets, and default
-    /// options until [`sample_weight`](CoxModel::sample_weight), [`offset`](CoxModel::offset), or
-    /// [`options`](CoxModel::options) changes them.
+    /// Creates a Cox proportional hazards model for this data.
+    ///
+    /// Defaults to unit weights, zero offsets, and [`CoxOptions::default()`]; configure them with
+    /// [`sample_weight`](CoxModel::sample_weight), [`offset`](CoxModel::offset), and
+    /// [`options`](CoxModel::options).
     pub fn model(&self) -> CoxModel<'_> {
         CoxModel {
             data: self,
@@ -107,9 +116,10 @@ impl CoxData {
         }
     }
 
-    /// Returns the features of the stored rows as a new row-major vector. `CoxData` stores each
-    /// feature minus the center of its column, and this method adds the center back. A returned
-    /// value can therefore differ from the input value by the rounding error of that subtraction.
+    /// Returns the features of the retained rows in row-major order.
+    ///
+    /// Because `CoxData` centers each column internally and adds the center back here, returned
+    /// values can differ slightly from the original inputs due to floating-point rounding.
     #[must_use]
     pub fn features_row_major(&self) -> Vec<f64> {
         let data = &self.inner;
@@ -154,7 +164,7 @@ impl fmt::Debug for CoxData {
     }
 }
 
-/// A Cox proportional hazards model before it is fitted. [`CoxData::model`] creates the model.
+/// Unfitted Cox proportional hazards model created by [`CoxData::model`].
 #[derive(Clone, Copy)]
 #[must_use = "call `fit` to fit the model"]
 pub struct CoxModel<'a> {
@@ -165,16 +175,18 @@ pub struct CoxModel<'a> {
 }
 
 impl<'a> CoxModel<'a> {
-    /// `sample_weight[i]` is the nonnegative weight of input row `i`. Weights are counts. An
-    /// integer weight `m` gives the same estimates, standard errors, likelihood ratio tests, and
-    /// profile intervals as `m` copies of the row. A zero weight gives the same results as removing
-    /// the row.
+    /// Sets nonnegative frequency weights, one per original input row.
+    ///
+    /// An integer weight `m` produces the same estimates, standard errors, likelihood ratio tests,
+    /// and profile intervals as `m` identical copies of that row, and a weight of `0.0` excludes
+    /// the row from all risk sets.
     pub fn sample_weight(mut self, sample_weight: &'a [f64]) -> Self {
         self.sample_weight = Some(sample_weight);
         self
     }
 
-    /// `offset[i]` is added to the linear predictor of input row `i`.
+    /// Sets per-row offsets (one per original input row) added to the linear predictor
+    /// (`X @ beta + offset`).
     pub fn offset(mut self, offset: &'a [f64]) -> Self {
         self.offset = Some(offset);
         self
@@ -185,17 +197,21 @@ impl<'a> CoxModel<'a> {
         self
     }
 
-    /// Fits the Cox proportional hazards model with Firth's bias reduction.
+    /// Fits the Cox proportional hazards model using the Breslow approximation for tied event
+    /// times (grouped by exact equality in [`CoxData::new`]).
+    ///
+    /// Non-convergence is reported through [`CoxFit::status`] rather than returned as an error.
     ///
     /// # Errors
     ///
-    /// Returns `InvalidDimensions` if the weights or offsets do not have one value per input row.
-    /// Returns `InvalidInput` for an out-of-range option, a negative or non-finite weight, a
-    /// non-finite offset, or no positive-weight event. Returns `RankDeficient` when some linear
-    /// combination of the columns is constant over the positive-weight rows. For example, a full
-    /// set of indicator columns sums to one on every row. The partial likelihood does not depend on
-    /// such a combination. Returns a numerical error if a factorization fails at the starting
-    /// coefficients or while the solver computes a Newton step.
+    /// Returns [`Error::InvalidDimensions`] if `sample_weight` or `offset` does not have one entry
+    /// per original input row. Returns [`Error::InvalidInput`] if an option is out of range, if
+    /// any weight is negative or non-finite, if any offset is non-finite, or if there are no
+    /// positive-weight events. Returns [`Error::RankDeficient`] when a linear combination of the
+    /// feature columns is constant over the positive-weight rows (for example, a full set of
+    /// indicator columns summing to one), since the partial likelihood does not identify such
+    /// directions. Returns a numerical error if factorization fails at the starting coefficients
+    /// or while computing a Newton step.
     pub fn fit(self) -> Result<CoxFit> {
         let options = self.options;
         options.solver.validate()?;
@@ -249,6 +265,11 @@ impl fmt::Debug for CoxModel<'_> {
     }
 }
 
+/// Fitted Cox proportional hazards model returned by [`CoxModel::fit`].
+///
+/// Non-converged fits are returned with a non-converged [`status`](Self::status) instead of an
+/// error. When a fit did not converge or its Fisher information is singular,
+/// [`covariance`](Self::covariance) is `None` and Wald standard errors and p-values are `NaN`.
 pub struct CoxFit {
     estimate: Estimate,
     unique_times: Vec<f64>,
@@ -280,25 +301,27 @@ impl CoxFit {
         CoxObjective::new(&self.data.inner, &self.inputs, self.options.penalty_weight)
     }
 
-    /// Returns the data of the fit. To rebuild the fit later, create a new `CoxData` from the
-    /// stored rows of this data, and fit its model with [`sample_weight`](Self::sample_weight),
-    /// [`offset`](Self::offset), and [`options`](Self::options). The refit gives the same
-    /// coefficients up to rounding. The weights and offsets have one value per stored row. Do not
-    /// pass them to the model of this data, which takes one value per input row.
+    /// Returns the prepared data used for this fit.
+    ///
+    /// To rebuild the fit later, construct a new [`CoxData`] from its retained rows and fit with
+    /// [`sample_weight`](Self::sample_weight), [`offset`](Self::offset), and
+    /// [`options`](Self::options) (the refit reproduces the same coefficients up to floating-point
+    /// rounding). Because `sample_weight` and `offset` are aligned with the retained rows rather
+    /// than the original input rows, do not pass them back to `self.data().model()`.
     #[must_use]
     pub fn data(&self) -> &CoxData {
         &self.data
     }
 
-    /// Returns the weight of each stored row of [`data`](Self::data), or `None` if the model had no
-    /// sample weights.
+    /// Returns the weight of each retained row in [`data`](Self::data), or `None` if no sample
+    /// weights were set.
     #[must_use]
     pub fn sample_weight(&self) -> Option<&[f64]> {
         self.inputs.sample_weight.as_deref()
     }
 
-    /// Returns the offset of each stored row of [`data`](Self::data), or `None` if the model had no
-    /// offsets.
+    /// Returns the offset of each retained row in [`data`](Self::data), or `None` if no offsets
+    /// were set.
     #[must_use]
     pub fn offset(&self) -> Option<&[f64]> {
         self.inputs.offset.as_deref()
@@ -314,11 +337,14 @@ impl CoxFit {
         &self.estimate.beta
     }
 
+    /// Penalized Breslow partial log-likelihood at the fitted coefficients (equals the unpenalized
+    /// partial log-likelihood when `penalty_weight` is `0.0`).
     #[must_use]
     pub fn log_likelihood(&self) -> f64 {
         self.estimate.log_likelihood
     }
 
+    /// Standard errors from the inverse Fisher information at the penalized estimate.
     #[must_use]
     pub fn standard_errors(&self) -> &[f64] {
         &self.estimate.standard_errors
@@ -333,6 +359,8 @@ impl CoxFit {
         self.estimate.covariance.as_deref()
     }
 
+    /// Two-sided Wald p-values for all [`coefficients`](Self::coefficients), or `NaN` if the fit
+    /// did not converge or the Fisher information is singular.
     #[must_use]
     pub fn p_values(&self) -> &[f64] {
         &self.estimate.p_values
@@ -407,13 +435,13 @@ impl CoxFit {
             .collect())
     }
 
-    /// Computes Harrell's concordance index (C-index). [`Self::linear_predictor`] gives the risk
-    /// scores.
+    /// Computes Harrell's concordance index (C-index) using [`Self::linear_predictor`] as the risk
+    /// score.
     ///
     /// # Errors
     ///
-    /// Returns `InvalidDimensions` for mismatched shapes and `InvalidInput` for non-finite values
-    /// or negative times.
+    /// Returns [`Error::InvalidDimensions`] for mismatched shapes and [`Error::InvalidInput`] for
+    /// non-finite values or negative times.
     pub fn concordance(
         &self,
         features: MatrixView,
@@ -478,29 +506,26 @@ impl CoxFit {
         self.estimate.wald_confidence_intervals(alpha)
     }
 
-    /// Penalized likelihood ratio test that the coefficients at `indices` are all zero. The test
-    /// has `indices.len()` degrees of freedom.
+    /// Penalized likelihood ratio test that the coefficients at `indices` are all zero, with
+    /// `indices.len()` degrees of freedom.
     ///
-    /// The test refits the model with the coefficients at `indices` fixed to zero.
+    /// The test refits the model with those coefficients fixed to zero while keeping the
+    /// full-model penalty term.
     ///
-    /// When `warm_start` is false, the other coefficients start at zero.
-    /// When `warm_start` is true, the other coefficients start at their conditional mean given that the
-    /// fixed coefficients are zero. Let `C` be the inverse Fisher information of the full fit,
-    /// returned by [`covariance`](Self::covariance). The conditional mean is computed as if the
-    /// full estimate `beta` were normal with covariance `C`. Let `S` be the positions in `indices`.
-    /// Let `F` be the other positions. The start is then `beta_F - C_FS C_SS^-1 beta_S`. With one
-    /// tested coefficient `j`, each free coefficient `f` starts at `beta_f - beta_j C_fj / C_jj`.
-    ///
-    /// Equivalently, the start is the result of one Newton step from the full estimate with the
-    /// coefficients at `indices` set to zero. The step changes only the other coefficients. It uses
-    /// a quadratic approximation of the penalized log-likelihood around the full estimate.
+    /// When `warm_start` is `false`, the free coefficients start at zero. When `warm_start` is
+    /// `true`, they start at their conditional mean given that the fixed coefficients are zero,
+    /// treating the full estimate `beta` as normal with covariance `C`
+    /// ([`covariance`](Self::covariance)): `beta_F - C_FS C_SS^-1 beta_S`, where `S` is `indices`
+    /// and `F` is the remaining positions. For a single tested coefficient `j`, each free
+    /// coefficient `f` starts at `beta_f - beta_j C_fj / C_jj`. Equivalently, this is one Newton
+    /// step from the full estimate under a quadratic approximation to the penalized
+    /// log-likelihood, updating only the free coefficients after setting `S` to zero.
     ///
     /// # Errors
     ///
-    /// Returns `InvalidInput` if `indices` is empty, repeats an index, or contains an index past
-    /// the last parameter. This method does not return an error when the full or constrained fit
-    /// does not converge. The returned `LrtResult` then has status `FullFitNonconvergence` or
-    /// `ConstrainedFitNonconvergence`.
+    /// Returns [`Error::InvalidInput`] if `indices` is empty, contains duplicates, or has an index
+    /// out of bounds. Non-convergence of the full or constrained fit is not an error; it is
+    /// reported via [`LrtResult::status`].
     pub fn likelihood_ratio_test(&self, indices: &[usize], warm_start: bool) -> Result<LrtResult> {
         let mut objective = self.objective();
         self.estimate
@@ -509,15 +534,15 @@ impl CoxFit {
             })
     }
 
-    /// Computes one bound of a profile-likelihood confidence interval with the Venzon-Moolgavkar
+    /// Computes one bound of a profile-likelihood confidence interval using the Venzon-Moolgavkar
     /// (1988) algorithm.
     ///
     /// # Errors
     ///
-    /// Returns `InvalidInput` if `index`, `alpha`, or a field of `options` is out of range. This
-    /// method does not return an error when the fit or the profile iteration does not converge, or
-    /// when an evaluation or a linear solve fails. The returned `ProfileBound` then has a status
-    /// other than `Valid`.
+    /// Returns [`Error::InvalidInput`] if `index`, `alpha`, or a field of `options` is out of
+    /// range. Non-convergence of the full fit or the profile iteration, as well as evaluation or
+    /// linear-solve failures, are reported via [`ProfileBound::status`] rather than returned as
+    /// errors.
     pub fn profile_confidence_bound(
         &self,
         index: usize,
@@ -676,10 +701,9 @@ fn baseline_hazard(data: &CoxPrecomputed, pass: &RiskSetPass) -> (Vec<f64>, Vec<
     log_hazard.reverse();
 
     // The log cumulative hazard is the prefix log-sum-exp of the log hazard increments. `sum` is
-    // the prefix sum of `exp(increment - max)`, where `max` is the running maximum of the
-    // increments. The loop rescales `sum` when `max` grows. No `exp` or `ln` call depends on the
-    // result of the previous `ln` call. The processor can therefore overlap consecutive steps. An
-    // increment of negative infinity adds nothing to `sum`.
+    // the prefix sum of `exp(increment - max)`, where `max` is the running maximum, rescaled
+    // whenever `max` grows. Because `exp` and `ln` never depend on the previous `ln` result, the
+    // CPU can overlap consecutive steps. Increments of negative infinity contribute nothing.
     let mut log_cumulative_hazard = log_hazard;
     let mut max = f64::NEG_INFINITY;
     let mut sum = 0.0;
@@ -782,8 +806,8 @@ impl CoxPrecomputed {
             .find(|&end| end > last_event_row)
             .expect("the final block contains the final event");
 
-        // Samples censored before the earliest event time are in no risk set of an event. Samples
-        // censored at the earliest event time are in the risk set of that event.
+        // Samples censored before the earliest event time do not enter any event's risk set,
+        // whereas samples censored at the earliest event time do.
         let n = risk_set_rows;
         order.truncate(n);
         time_sorted.truncate(n);
@@ -954,7 +978,7 @@ fn cox_quantities(
     } = &mut *workspace;
     risk_set_pass(data, inputs, beta, pass);
     let n_event_blocks = pass.blocks.len();
-    // Samples past the end of the last event block are in no risk set of a positive-weight event.
+    // Samples past the last event block do not enter any positive-weight event's risk set.
     let risk_set_rows = pass.blocks.last().map_or(0, |block| block.end);
     let x_bar = MatRef::from_row_major_slice(&pass.x_bar, n_event_blocks, k);
     event_weights.clear();
