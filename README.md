@@ -4,7 +4,7 @@ Firth-penalized logistic and Cox proportional hazards regression in Rust.
 
 - **Penalized and unpenalized fits** for logistic and Cox proportional hazards regression, with configurable `penalty_weight` (defaults to 0.5 for Firth's penalty, or 0 for standard maximum likelihood).
 - **Wald, likelihood ratio, and profile-likelihood inference**, including joint penalized likelihood ratio tests on arbitrary subsets of parameters and Venzon-Moolgavkar profile confidence bounds.
-- **Prepared data structures** ([`LogisticData`](src/logistic.rs) and [`CoxData`](src/cox.rs)) that check and store the data once for reuse across many fits (such as bootstrap replicates). A `LogisticData` can also be reused across outcomes (such as in permutation tests or multi-outcome scans).
+- **Prepared data structures** (`LogisticData` and `CoxData`) that check and store the data once for reuse across many fits (such as bootstrap replicates). A `LogisticData` can also be reused across outcomes (such as in permutation tests or multi-outcome scans).
 - **Single-threaded, `Send + Sync` execution** allowing callers to parallelize across fits or inference queries.
 
 ## Platforms

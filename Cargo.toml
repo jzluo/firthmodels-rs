@@ -8,6 +8,7 @@ repository = "https://github.com/jzluo/firthmodels-rs"
 license = "MIT OR Apache-2.0"
 keywords = ["firth", "logistic-regression", "cox-regression", "survival-analysis", "statistics"]
 categories = ["science", "mathematics"]
+exclude = [".github/", ".gitignore", "rustfmt.toml"]
 
 [dependencies]
 faer = { version = "0.24.4", default-features = false, features = ["std"] }
