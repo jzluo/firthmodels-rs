@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.89"
 description = "Firth-penalized logistic and Cox regression"
 repository = "https://github.com/jzluo/firthmodels-rs"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 keywords = ["firth", "logistic-regression", "cox-regression", "survival-analysis", "statistics"]
 categories = ["science", "mathematics"]
 
