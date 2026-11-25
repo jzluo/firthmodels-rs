@@ -167,8 +167,8 @@ pub(crate) fn a_mul_b(a: MatRef<'_, f64>, b: MatRef<'_, f64>, out: MatMut<'_, f6
     let (m, k) = a.shape();
     assert_eq!(b.shape(), (k, k));
     assert_eq!(out.shape(), (m, k));
-    // When `a` is row-major, the call uses `ROW_MAJOR` order. dgemm then reads the column-major `b`
-    // as `b.T`. The call therefore passes `TRANS` for `b`.
+    // For row-major `a`, call dgemm in `ROW_MAJOR` order; dgemm then views column-major `b` as
+    // `b.T`, so pass `TRANS` for `b`.
     let (order, trans_b, lda, ldc) = if a.row_stride() == 1 {
         (
             COL_MAJOR,
@@ -279,7 +279,7 @@ pub(crate) fn exp_in_place(values: &mut [f64]) {
     let count = to_blas_int(values.len());
     let values = values.as_mut_ptr();
     // SAFETY: `values` is valid for reads and writes of `count` elements. The C declaration of
-    // vvexp has no `restrict` qualifier. The input and output can therefore be the same array.
+    // vvexp doesn't have a `restrict` qualifier, so the input and output can alias the same array.
     unsafe { vvexp(values, values, &raw const count) }
 }
 
@@ -335,8 +335,8 @@ mod tests {
             [0.5, -0.3, 1.7, 0.2, -1.1],
             [-1.0, 2.0, 0.4, -0.6, 1.3]
         ];
-        // The dsyrk call adds to the lower triangle of `out`. It never writes the upper triangle.
-        // The test therefore starts from 99s and checks both triangles.
+        // dsyrk adds to the lower triangle of `out` and never writes the upper triangle, so
+        // initialize with 99s and verify both triangles.
         let mut out = Mat::from_fn(3, 3, |_, _| 99.0);
         a_mul_a_transpose_lower(a.as_ref().subcols(0, 2), out.as_mut());
         a_mul_a_transpose_lower(a.as_ref().subcols(2, 3), out.as_mut());

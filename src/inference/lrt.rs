@@ -110,11 +110,15 @@ impl LrtResult {
         self.status.is_valid()
     }
 
+    /// Number of Newton-Raphson iterations taken by the constrained fit (`0` if no constrained fit
+    /// ran).
     #[must_use]
     pub const fn iterations(&self) -> usize {
         self.iterations
     }
 
+    /// Status of the full or constrained fit when non-convergence caused the test to be invalid;
+    /// `None` otherwise.
     #[must_use]
     pub const fn fit_status(&self) -> Option<FitStatus> {
         self.fit_status

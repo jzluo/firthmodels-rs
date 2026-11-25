@@ -28,7 +28,7 @@ pub enum InferenceStatus {
     /// The profile iteration did not converge within the iteration limit. A bound also has this
     /// status when a linear solve fails or an evaluation returns an error other than `NonFinite`.
     ProfileBoundNonconvergence,
-    /// The profile iteration ended on the other side of the estimate.
+    /// The profile iteration ended on the opposite side of the point estimate.
     ProfileBoundWrongSide,
 }
 

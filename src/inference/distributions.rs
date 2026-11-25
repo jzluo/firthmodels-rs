@@ -93,11 +93,10 @@ fn chi_squared_cdf_series(x: f64, df: usize) -> f64 {
 
 /// `ln chi_squared_sf(x, df)` for `x >= df` and `df >= 2`.
 ///
-/// With `y = x / 2` and `m = df / 2` rounded down, the tail is `exp(-y)` times a sum of `m` terms
-/// `y^(j + c) / Gamma(j + c + 1)`, where `c` is 1/2 for odd `df` and 0 for even `df`. For odd `df`,
-/// the tail is that product plus the 1-df tail. The terms grow with `j` because `y >= j + c`. The
-/// function therefore divides the tail by `exp(-y)` times the last term, which is the largest term.
-/// It returns the log of that divisor plus the log of the quotient.
+/// With `y = x / 2` and `m = floor(df / 2)`, the tail is `exp(-y)` times the sum of `m` terms
+/// `y^(j + c) / Gamma(j + c + 1)`, where `c` is 1/2 for odd `df` and 0 for even `df` (plus the
+/// 1-df tail when `df` is odd). Because `y >= j + c`, the terms grow with `j`, so this factors
+/// out `exp(-y)` times the largest (last) term and returns the sum of the two logs.
 fn chi_squared_upper_log_sf(x: f64, df: usize) -> f64 {
     if x == f64::INFINITY {
         return f64::NEG_INFINITY;

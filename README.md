@@ -12,8 +12,9 @@ Firth-penalized logistic and Cox proportional hazards regression in Rust.
 Requires Rust 1.89 or later. The crate uses [faer](https://crates.io/crates/faer) for linear
 algebra and [fearless_simd](https://crates.io/crates/fearless_simd) for SIMD kernels.
 
-On Apple silicon, the crate also calls Accelerate for BLAS, LAPACK, and vForce operations. Some of
-these Accelerate functions exist only in macOS 13.3 and later. Set `MACOSX_DEPLOYMENT_TARGET` to 13.3 or later when you build a program that must run on other Macs.
+On Apple silicon, the crate also calls Apple Accelerate for BLAS, LAPACK, and vForce operations.
+Some of these symbols require macOS 13.3 or later, so set `MACOSX_DEPLOYMENT_TARGET=13.3` (or
+newer) when building binaries for distribution to other Macs.
 
 ## Examples
 
@@ -89,9 +90,10 @@ fn main() -> Result<()> {
 
 ### Reusing prepared data across fits
 
-To fit many models on the same data, create one `LogisticData` or `CoxData` and call `model` for
-each fit. The fits can differ in their weights (such as frequency weights for bootstrap resamples),
-offsets, and options. Since `LogisticData` only stores the features, a `LogisticData` can be reused across outcomes. `CoxData::new` sorts the samples by survival time and groups tied times up front, so each outcome needs its own `CoxData`.
+To fit many models on the same data, construct one `LogisticData` or `CoxData` and call `model` for each fit with different 
+sample weights (such as bootstrap frequency weights), offsets, or options. Because `LogisticData` stores only the feature 
+matrix, you can also reuse it across different outcomes. `CoxData::new` sorts samples by survival time and groups tied 
+times up front, so a different survival outcome requires a separate `CoxData`.
 
 ```rust
 use firthmodels::{CoxData, MatrixView, Result};
@@ -102,7 +104,7 @@ fn main() -> Result<()> {
     let event = [true, true, false, true, false, true];
     let data = CoxData::new(features, &time, &event)?;
 
-    // Both fits reuse the sorted data. Each fit has its own frequency weights.
+    // Both fits reuse the sorted data with different frequency weights.
     for weights in [[1.0, 2.0, 1.0, 1.0, 0.0, 1.0], [2.0, 1.0, 0.0, 1.0, 1.0, 1.0]] {
         let fit = data.model().sample_weight(&weights).fit()?;
         assert!(fit.status().is_converged());

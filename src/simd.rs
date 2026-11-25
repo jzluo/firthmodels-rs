@@ -22,10 +22,9 @@ pub(crate) fn store<S: Simd>(value: S::f64s, out: &mut [f64]) {
     if out.len() >= S::f64s::LEN {
         value.store_slice(&mut out[..S::f64s::LEN]);
     } else {
-        // LLVM compiles a copy of `out.len()` elements to a memcpy call, even when the copy is a
-        // loop over `out`. A call inside a kernel loop slows the loop, because a call preserves at
-        // most the low 64 bits of each vector register. LLVM unrolls this loop instead, because
-        // the loop has one iteration per lane and a conditional store.
+        // LLVM turns a variable-length slice copy into a memcpy call, which spills vector
+        // registers (calls only preserve the low 64 bits) and slows kernel loops. Iterating over
+        // the fixed lane count with a conditional store lets LLVM unroll it instead.
         for (i, &lane) in value.as_slice().iter().enumerate() {
             if let Some(element) = out.get_mut(i) {
                 *element = lane;

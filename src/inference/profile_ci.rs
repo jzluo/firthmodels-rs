@@ -70,24 +70,25 @@ impl ProfileBound {
         self.iterations
     }
 
+    /// Status of the full fit when [`InferenceStatus::FullFitNonconvergence`] occurred; `None`
+    /// otherwise.
     #[must_use]
     pub const fn fit_status(&self) -> Option<FitStatus> {
         self.fit_status
     }
 }
 
-/// Controls for the Venzon-Moolgavkar iteration that locates a profile likelihood bound.
+/// Controls for the Venzon-Moolgavkar iteration that locates a profile-likelihood bound.
 ///
-/// The first run starts at the bound of the Wald interval with the same `alpha`. If the first
-/// run does not reach a valid bound, a second run starts halfway between the estimate and that
-/// Wald bound. The halfway point is the starting point in Venzon and Moolgavkar (1988, Eq. 6).
+/// The solver starts from the Wald bound at the same `alpha`. If that run fails to reach a valid
+/// bound, it retries from halfway between the point estimate and the Wald bound (Venzon &
+/// Moolgavkar 1988, Eq. 6).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProfileOptions {
-    /// The maximum number of iterations per run.
+    /// Maximum number of iterations per run.
     pub max_iterations: usize,
-    /// The iteration converges only when the largest of `|l - l*|` and the absolute scores of the
-    /// nuisance parameters is at most this value. Here `l*` is the penalized log-likelihood at the
-    /// bound.
+    /// Convergence tolerance on `max(|l - l*|, max |dl/dw|)`, where `l*` is the target penalized
+    /// log-likelihood at the bound and `w` are the nuisance parameters.
     pub tolerance: f64,
 }
 

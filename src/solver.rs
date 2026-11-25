@@ -4,21 +4,22 @@ use faer::{ColRef, Mat};
 use crate::linalg::{has_cancelled_direction, least_squares, spd_solve};
 use crate::{Error, Result};
 
+/// Controls for the Newton-Raphson solver.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NewtonOptions {
-    /// Maximum number of Newton-Raphson updates of the coefficients.
+    /// Maximum number of Newton-Raphson iterations.
     pub max_iterations: usize,
-    /// Maximum absolute change of any coefficient in one step. The solver scales down the whole
-    /// step when any change exceeds this value.
+    /// Maximum absolute change in any coefficient per step. Larger steps are scaled down
+    /// uniformly.
     pub max_step: f64,
-    /// Maximum number of half-steps after a rejected full step. With zero, the solver accepts every
-    /// full step it can evaluate, including one that lowers the penalized log-likelihood.
+    /// Maximum number of step-halving attempts after a rejected full step. If `0`, every evaluable
+    /// full step is accepted even if it decreases the penalized log-likelihood.
     pub max_half_steps: usize,
-    /// Convergence tolerance for the largest absolute entry of the modified score (`gtol` in
+    /// Convergence tolerance on the largest absolute entry of the modified score (`gtol` in
     /// scipy).
     pub gradient_tolerance: f64,
-    /// Convergence tolerance for the largest absolute change of a coefficient in a Newton step
-    /// (`xtol` in scipy).
+    /// Convergence tolerance on the largest absolute coefficient change in a Newton step (`xtol`
+    /// in scipy).
     pub step_tolerance: f64,
 }
 
@@ -52,8 +53,8 @@ impl NewtonOptions {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FitStatus {
     Converged,
-    /// No tested step length improved the penalized log-likelihood. A step where evaluation fails
-    /// counts as not improving it.
+    /// Step halving could not find a step that improved the penalized log-likelihood (including
+    /// trial steps where evaluation failed).
     StepHalvingFailed,
     /// Failed to converge within the iteration limit.
     MaximumIterations,
@@ -162,9 +163,8 @@ pub(crate) fn newton_raphson(
             }
         }
 
-        // Evaluation can fail at a trial point even when it succeeds at a point nearer the current
-        // one. For example, evaluation can fail where the fitted probabilities are very close to 0
-        // or 1. On such an error, the solver rejects the step in the same way as on a lower
+        // A trial step can fail to evaluate (for example, when fitted probabilities saturate near
+        // 0 or 1) even when a shorter step succeeds, so treat evaluation errors like a decreased
         // log-likelihood.
         let mut beta_new: Vec<f64> = beta.iter().zip(&delta).map(|(b, d)| b + d).collect();
         if let Ok(quantities_new) = compute_quantities(&beta_new)
@@ -336,9 +336,9 @@ mod tests {
 
     #[test]
     fn evaluation_error_at_trial_point_rejects_the_step() {
-        // The step matrix is half the curvature. The full step therefore moves beta to 2, where
-        // evaluation fails. The half step moves beta to 1, which is the maximum. When
-        // `max_half_steps` is 0, the fit returns `StepHalvingFailed` at beta = 0.
+        // The step matrix is half the curvature, so the full step moves beta to 2 where evaluation
+        // fails, while the half step lands on the maximum at beta = 1. With `max_half_steps = 0`,
+        // the fit returns `StepHalvingFailed` at beta = 0.
         for (max_half_steps, expected_status, expected_beta) in [
             (2, FitStatus::Converged, 1.0),
             (0, FitStatus::StepHalvingFailed, 0.0),
