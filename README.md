@@ -1,5 +1,8 @@
 # firthmodels
 
+[![Crates.io](https://img.shields.io/crates/v/firthmodels.svg)](https://crates.io/crates/firthmodels)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24548826.svg)](https://doi.org/10.5281/zenodo.24548826)
+
 Firth-penalized logistic and Cox proportional hazards regression in Rust.
 
 - **Penalized and unpenalized fits** for logistic and Cox proportional hazards regression, with configurable `penalty_weight` (defaults to 0.5 for Firth's penalty, or 0 for standard maximum likelihood).
@@ -15,6 +18,12 @@ algebra and [fearless_simd](https://crates.io/crates/fearless_simd) for SIMD ker
 On Apple silicon, the crate also calls Apple Accelerate for BLAS, LAPACK, and vForce operations.
 Some of these symbols require macOS 13.3 or later, so set `MACOSX_DEPLOYMENT_TARGET=13.3` (or
 newer) when building binaries for distribution to other Macs.
+
+## Installation
+
+```sh
+cargo add firthmodels
+```
 
 ## Examples
 
