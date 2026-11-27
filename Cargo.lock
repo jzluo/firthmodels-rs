@@ -193,7 +193,7 @@ checksum = "6a7107516a8be9a4ffe92495f3dbfe04348be0ad18f17c67a1d846511f99e599"
 
 [[package]]
 name = "firthmodels"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "faer",
  "fearless_simd",
