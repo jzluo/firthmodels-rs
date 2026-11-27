@@ -230,7 +230,7 @@ impl<'a> CoxModel<'a> {
         if pass.beta != estimate.beta {
             risk_set_pass(data, &inputs, &estimate.beta, pass);
         }
-        let (unique_times, log_cumulative_baseline_hazard) = baseline_hazard(data, pass);
+        let (unique_times, log_cumulative_baseline_hazard) = baseline_hazard(data, &inputs, pass);
         let cumulative_baseline_hazard: Vec<f64> = log_cumulative_baseline_hazard
             .iter()
             .map(|&value| value.exp())
@@ -678,7 +678,11 @@ impl RankCounts {
 ///
 /// Returns the unique event times in ascending order and the log cumulative
 /// baseline hazard at each of those times.
-fn baseline_hazard(data: &CoxPrecomputed, pass: &RiskSetPass) -> (Vec<f64>, Vec<f64>) {
+fn baseline_hazard(
+    data: &CoxPrecomputed,
+    inputs: &CaseInputs,
+    pass: &RiskSetPass,
+) -> (Vec<f64>, Vec<f64>) {
     let center_linear_predictor: f64 = pass
         .beta
         .iter()
@@ -687,15 +691,16 @@ fn baseline_hazard(data: &CoxPrecomputed, pass: &RiskSetPass) -> (Vec<f64>, Vec<
         .sum();
 
     // The blocks are in descending time order.
-    let mut unique_times: Vec<f64> = pass
-        .blocks
+    let mut unique_times: Vec<f64> = inputs
+        .event_block_ends
         .iter()
-        .map(|block| data.time[block.end - 1])
+        .map(|&end| data.time[end - 1])
         .collect();
-    let mut log_hazard: Vec<f64> = pass
-        .blocks
+    let mut log_hazard: Vec<f64> = inputs
+        .event_block_weights
         .iter()
-        .map(|block| block.event_weight.ln() - block.log_s0 - center_linear_predictor)
+        .zip(&pass.log_s0)
+        .map(|(event_weight, log_s0)| event_weight.ln() - log_s0 - center_linear_predictor)
         .collect();
     unique_times.reverse();
     log_hazard.reverse();
@@ -864,14 +869,15 @@ struct CaseInputs {
     /// `offset + ln(weight)` for each sorted sample, or `None` when the fit has neither weights nor
     /// offsets. A zero weight gives negative infinity.
     eta_shift: Option<Vec<f64>>,
-    /// Summed weight of the events in each time block.
-    event_weights: Vec<f64>,
+    /// Exclusive end index in the sorted arrays of each time block with positive event weight
+    /// (the event blocks).
+    event_block_ends: Vec<usize>,
+    /// Summed event weight in each event block.
+    event_block_weights: Vec<f64>,
     /// Weighted sum of the centered features over all events.
     event_feature_totals: Vec<f64>,
     /// Weighted sum of the offsets over all events.
     event_offset_total: f64,
-    /// Number of time blocks with positive event weight.
-    n_event_blocks: usize,
 }
 
 impl CaseInputs {
@@ -906,7 +912,7 @@ impl CaseInputs {
         };
         inputs.sample_weight = sample_weight;
         inputs.offset = offset;
-        if inputs.n_event_blocks == 0 {
+        if inputs.event_block_ends.is_empty() {
             return Err(Error::InvalidInput(
                 "at least one positive-weight event is required".into(),
             ));
@@ -922,33 +928,50 @@ impl CaseInputs {
         weight: impl Fn(usize) -> f64,
         offset: impl Fn(usize) -> f64,
     ) -> Self {
-        let mut event_weights = vec![0.0; data.block_ends.len()];
+        let mut event_block_ends = Vec::new();
+        let mut event_block_weights = Vec::new();
         let mut event_feature_totals = vec![0.0; data.n_features];
         let mut event_offset_total = 0.0;
         let mut start = 0;
-        for (event_weight, &end) in event_weights.iter_mut().zip(&data.block_ends) {
+        for &end in &data.block_ends {
+            let mut event_weight = 0.0;
             for i in start..end {
                 if data.event[i] {
                     let weight = weight(i);
-                    *event_weight += weight;
+                    event_weight += weight;
                     event_offset_total += weight * offset(i);
                     for (total, &x) in event_feature_totals.iter_mut().zip(data.row(i)) {
                         *total += weight * x;
                     }
                 }
             }
+            if event_weight > 0.0 {
+                event_block_ends.push(end);
+                event_block_weights.push(event_weight);
+            }
             start = end;
         }
-        let n_event_blocks = event_weights.iter().filter(|&&weight| weight > 0.0).count();
+        event_block_ends.shrink_to_fit();
+        event_block_weights.shrink_to_fit();
         Self {
             sample_weight: None,
             offset: None,
             eta_shift,
-            event_weights,
+            event_block_ends,
+            event_block_weights,
             event_feature_totals,
             event_offset_total,
-            n_event_blocks,
         }
+    }
+
+    fn n_event_blocks(&self) -> usize {
+        self.event_block_ends.len()
+    }
+
+    /// Returns the end of the last event block. Later samples are not in the risk set of any
+    /// positive-weight event.
+    fn risk_set_rows(&self) -> usize {
+        self.event_block_ends[self.event_block_ends.len() - 1]
     }
 }
 
@@ -963,52 +986,50 @@ fn cox_quantities(
     beta: &[f64],
     workspace: &mut CoxWorkspace,
 ) -> Result<IterationQuantities> {
-    let n = data.n_samples();
     let k = data.n_features();
-    let design = MatRef::from_row_major_slice(&data.x, n, k);
+    let rows = inputs.risk_set_rows();
+    let n_event_blocks = inputs.n_event_blocks();
+    let design = MatRef::from_row_major_slice(&data.x[..rows * k], rows, k);
 
     let CoxWorkspace {
         matrix_scratch,
         pass,
-        normalized_risk,
-        weights,
-        cumulative_weight,
-        event_weights,
         ..
     } = &mut *workspace;
     risk_set_pass(data, inputs, beta, pass);
-    let n_event_blocks = pass.blocks.len();
-    // Samples past the last event block do not enter any positive-weight event's risk set.
-    let risk_set_rows = pass.blocks.last().map_or(0, |block| block.end);
     let x_bar = MatRef::from_row_major_slice(&pass.x_bar, n_event_blocks, k);
-    event_weights.clear();
-    event_weights.extend(pass.blocks.iter().map(|block| block.event_weight));
 
-    // `cumulative_weight[e]` is the sum of `event_weights[f] * S0[e] / S0[f]` over the blocks
-    // `f >= e`. `S0[e]` is the risk-set sum of block `e`.
-    cumulative_weight.resize(n_event_blocks, 0.0);
+    // Backward over event blocks: normalize each sample's risk by `S0[e]` (the risk-set sum of the
+    // first event block whose risk set contains sample `i`), replace `S0[e]` in `block_scratch[e]`
+    // with the carry `S0[e] / S0[e + 1]`, and replace the running max of eta in `sample_scratch[i]`
+    // with the Gram weight `normalized_risk[i] * cumulative_weight`. Here `cumulative_weight`
+    // accumulates `sum_{f >= e} event_weight[f] * S0[e] / S0[f]`.
+    let ends = inputs.event_block_ends.as_slice();
+    let event_weight = inputs.event_block_weights.as_slice();
+    let risk = pass.risk.as_mut_slice();
+    let sample_scratch = pass.sample_scratch.as_mut_slice();
+    let block_scratch = pass.block_scratch.as_mut_slice();
+    let mut cumulative_weight = 0.0;
+    let mut next_s0 = 0.0;
+    let mut next_max = 0.0;
+    let mut end = rows;
     for e in (0..n_event_blocks).rev() {
-        let block = &pass.blocks[e];
-        cumulative_weight[e] = block.event_weight
-            + if e + 1 < n_event_blocks {
-                pass.carry(e) * cumulative_weight[e + 1]
+        let start = if e == 0 { 0 } else { ends[e - 1] };
+        let block_max = sample_scratch[end - 1];
+        let block_s0 = block_scratch[e];
+        let carry = if e + 1 < n_event_blocks {
+            let ratio = block_s0 / next_s0;
+            if block_max < next_max {
+                ratio * (block_max - next_max).exp()
             } else {
-                0.0
-            };
-    }
-
-    // Divide the risk of each sample by the risk-set sum of the first event block whose risk set
-    // contains the sample.
-    *normalized_risk = vec![0.0; n];
-    *weights = vec![0.0; n];
-    let normalized_risk = normalized_risk.as_mut_slice();
-    let weights = weights.as_mut_slice();
-    let running_max_eta = pass.running_max_eta.as_slice();
-    let pass_scaled_risk = pass.scaled_risk.as_slice();
-    let mut start = 0;
-    for (e, block) in pass.blocks.iter().enumerate() {
-        let block_max = running_max_eta[block.end - 1];
-        let inverse_s0 = 1.0 / block.s0;
+                ratio
+            }
+        } else {
+            0.0
+        };
+        cumulative_weight = event_weight[e] + carry * cumulative_weight;
+        block_scratch[e] = carry;
+        let inverse_s0 = 1.0 / block_s0;
         // Convert a risk from the scale of `max` to the scale of `block_max`.
         let factor_at = |max: f64| {
             if max < block_max {
@@ -1017,22 +1038,27 @@ fn cox_quantities(
                 inverse_s0
             }
         };
-        let mut factor_max = running_max_eta[start];
-        let mut factor = factor_at(factor_max);
-        for i in start..block.end {
-            if running_max_eta[i] > factor_max {
-                factor_max = running_max_eta[i];
-                factor = factor_at(factor_max);
+        let mut factor_max = block_max;
+        let mut factor = inverse_s0;
+        for i in (start..end).rev() {
+            let max = sample_scratch[i];
+            if max < factor_max {
+                factor_max = max;
+                factor = factor_at(max);
             }
-            normalized_risk[i] = pass_scaled_risk[i] * factor;
-            weights[i] = normalized_risk[i] * cumulative_weight[e];
+            let normalized = risk[i] * factor;
+            risk[i] = normalized;
+            sample_scratch[i] = normalized * cumulative_weight;
         }
-        start = block.end;
+        next_s0 = block_s0;
+        next_max = block_max;
+        end = start;
     }
+    let weights = pass.sample_scratch.as_slice();
 
     let mut information = weighted_gram(design, weights, matrix_scratch);
     let gram_diagonal: Vec<f64> = (0..k).map(|j| information[(j, j)]).collect();
-    let mean_gram = weighted_gram(x_bar, event_weights, matrix_scratch);
+    let mean_gram = weighted_gram(x_bar, &inputs.event_block_weights, matrix_scratch);
     for r in 0..k {
         for s in 0..k {
             information[(r, s)] -= mean_gram[(r, s)];
@@ -1051,7 +1077,7 @@ fn cox_quantities(
     // design can also make the information numerically singular at extreme beta, only the first
     // evaluation of a workspace checks the rank.
     if !workspace.rank_checked {
-        check_design_rank(data, inputs, risk_set_rows, &quantities.step_matrix)?;
+        check_design_rank(data, inputs, &quantities.step_matrix)?;
         workspace.rank_checked = true;
     }
     if penalty_weight == 0.0 {
@@ -1061,6 +1087,7 @@ fn cox_quantities(
     let cholesky = factor_information(&quantities.step_matrix)?;
     firth_correction(
         data,
+        inputs,
         &cholesky.inverse,
         penalty_weight,
         &mut quantities.modified_score,
@@ -1072,17 +1099,16 @@ fn cox_quantities(
 }
 
 /// Returns `RankDeficient` when some combination of the columns, such as the sum of a full set of
-/// indicator columns, is constant over the positive-weight samples among the first `risk_set_rows`
-/// samples. Those samples form the largest risk set of a positive-weight event. The information is
-/// then singular. `cox_quantities` forms the information as a difference of two Gram matrices.
-/// Rounding in that difference can put the smallest pivot above the cutoff of `factor_information`.
-/// The QR factorization of the design with a column of ones runs only when the Cholesky
-/// factorization of the information fails or when its `minimum_relative_pivot` is at most
-/// `sqrt(max(n, k + 1)·eps)`.
+/// indicator columns, is constant over the positive-weight samples among the first
+/// `inputs.risk_set_rows()` samples. Those samples form the largest risk set of a positive-weight
+/// event. The information is then singular. `cox_quantities` forms the information as a difference
+/// of two Gram matrices. Rounding in that difference can put the smallest pivot above the cutoff of
+/// `factor_information`. The QR factorization of the design with a column of ones runs only when
+/// the Cholesky factorization of the information fails or when its `minimum_relative_pivot` is at
+/// most `sqrt(max(n, k + 1)·eps)`.
 fn check_design_rank(
     data: &CoxPrecomputed,
     inputs: &CaseInputs,
-    risk_set_rows: usize,
     information: &Mat<f64>,
 ) -> Result<()> {
     let k = data.n_features();
@@ -1093,7 +1119,7 @@ fn check_design_rank(
         Err(error) => return Err(error),
     }
     // Zero-weight samples have an `eta_shift` of negative infinity.
-    let rows: Vec<usize> = (0..risk_set_rows)
+    let rows: Vec<usize> = (0..inputs.risk_set_rows())
         .filter(|&i| {
             inputs
                 .eta_shift
@@ -1144,86 +1170,93 @@ fn factor_information(information: &Mat<f64>) -> Result<CholeskySummary> {
 #[inline(never)]
 fn firth_correction(
     data: &CoxPrecomputed,
+    inputs: &CaseInputs,
     fisher_inverse: &Mat<f64>,
     penalty_weight: f64,
     modified_score: &mut [f64],
     workspace: &mut CoxWorkspace,
 ) {
-    let n = data.n_samples();
     let k = data.n_features();
-    let design = MatRef::from_row_major_slice(&data.x, n, k);
+    let rows = inputs.risk_set_rows();
+    let n_event_blocks = inputs.n_event_blocks();
+    let design = MatRef::from_row_major_slice(&data.x[..rows * k], rows, k);
     let CoxWorkspace {
         matrix_scratch,
         pass,
-        normalized_risk,
-        weights,
         firth,
         ..
     } = workspace;
-    let FirthWorkspace {
-        hat,
-        h_bar,
-        transformed,
-    } = firth;
+    let FirthWorkspace { h_bar, transformed } = firth;
 
     // `hat[i] = dot(x[i] @ fisher_inverse, x[i])`.
-    *hat = vec![0.0; n];
-    quadratic_form_rows(design, fisher_inverse, hat, matrix_scratch);
+    quadratic_form_rows(
+        design,
+        fisher_inverse,
+        &mut pass.sample_scratch,
+        matrix_scratch,
+    );
+    let ends = inputs.event_block_ends.as_slice();
+    let event_weight = inputs.event_block_weights.as_slice();
+    let normalized_risk = pass.risk.as_slice();
+    let hat = pass.sample_scratch.as_slice();
+    let carry = pass.block_scratch.as_slice();
 
-    // `h_bar[e]` is the risk-weighted mean of `hat` over the risk set of block `e`. Like the
-    // risk-set sums, its numerator accumulates forward over the samples.
-    h_bar.clear();
-    h_bar.reserve_exact(pass.blocks.len());
-    let mut s0_h = 0.0;
+    // `h_bar[e]` is the risk-weighted mean of `hat` over block `e`'s risk set; multiplying
+    // `h_bar[e - 1]` by `carry[e - 1]` rescales the previous mean to `S0[e]`.
+    h_bar.resize(n_event_blocks, 0.0);
     let mut start = 0;
-    for block in &pass.blocks {
-        for (i, &h) in hat.iter().enumerate().take(block.end).skip(start) {
-            s0_h = pass.rescale(i) * s0_h + pass.scaled_risk[i] * h;
-        }
-        start = block.end;
-        h_bar.push(s0_h / block.s0);
+    for (e, &end) in ends.iter().enumerate() {
+        let sum: f64 = normalized_risk[start..end]
+            .iter()
+            .zip(&hat[start..end])
+            .map(|(risk, h)| risk * h)
+            .sum();
+        h_bar[e] = if e == 0 {
+            sum
+        } else {
+            carry[e - 1] * h_bar[e - 1] + sum
+        };
+        start = end;
     }
 
     // Accumulate design' residual - x_bar' block_residual over the blocks in reverse.
-    let hat = hat.as_slice();
-    let weights = weights.as_slice();
-    let normalized_risk = normalized_risk.as_slice();
     let mut correction = vec![0.0; k];
-    let x_bar = MatRef::from_row_major_slice(&pass.x_bar, pass.blocks.len(), k);
+    let x_bar = MatRef::from_row_major_slice(&pass.x_bar, n_event_blocks, k);
     let chunk_rows = (FIRTH_CHUNK_BYTES / (size_of::<f64>() * k)).max(1);
     with_const_k!(
         k,
         reverse_rows(
             data,
-            pass,
-            x_bar,
+            inputs,
+            &pass.x_bar,
+            carry,
             fisher_inverse,
             chunk_rows,
             hat,
             h_bar,
-            weights,
             normalized_risk,
             transformed,
             &mut correction,
         ),
         dispatch!(Level::new(), simd => {
             let mut cumulative = vec![0.0; k];
+            let mut cumulative_weight = 0.0;
             for_each_transformed_mean(x_bar, fisher_inverse, chunk_rows, transformed, |e, transformed_e| {
-                let block = &pass.blocks[e];
-                let carry = if e + 1 < pass.blocks.len() { pass.carry(e) } else { 0.0 };
                 for (value, &mean) in cumulative.iter_mut().zip(transformed_e) {
-                    *value = block.event_weight * mean + carry * *value;
+                    *value = event_weight[e] * mean + carry[e] * *value;
                 }
-                let start = if e == 0 { 0 } else { pass.blocks[e - 1].end };
-                for i in (start..block.end).rev() {
+                cumulative_weight = event_weight[e] + carry[e] * cumulative_weight;
+                let start = if e == 0 { 0 } else { ends[e - 1] };
+                for i in (start..ends[e]).rev() {
                     let row = data.row(i);
                     let form = dot(simd, row, &cumulative);
-                    let residual = weights[i] * hat[i] - 2.0 * normalized_risk[i] * form;
+                    let weight = normalized_risk[i] * cumulative_weight;
+                    let residual = weight * hat[i] - 2.0 * normalized_risk[i] * form;
                     axpy(simd, &mut correction, residual, row);
                 }
                 let x_bar_row = &pass.x_bar[e * k..(e + 1) * k];
                 let mean_form = dot(simd, x_bar_row, transformed_e);
-                let block_residual = block.event_weight * (h_bar[e] - 2.0 * mean_form);
+                let block_residual = event_weight[e] * (h_bar[e] - 2.0 * mean_form);
                 axpy(simd, &mut correction, -block_residual, x_bar_row);
             });
         })
@@ -1233,74 +1266,37 @@ fn firth_correction(
     }
 }
 
-/// Summary of one positive-weight event block from `risk_set_pass`.
-struct EventBlock {
-    /// End index (exclusive) of the block in the sorted samples.
-    end: usize,
-    /// Summed weight of the events in the block.
-    event_weight: f64,
-    /// Risk-set sum in the scale of `running_max_eta[end - 1]`.
-    s0: f64,
-    /// Log of the absolute risk-set sum, `running_max + ln(s0)`.
-    log_s0: f64,
-}
-
 /// Results of one streaming pass over the samples in descending time order.
+///
+/// The per-sample buffers cover the first `CaseInputs::risk_set_rows` samples, and the per-block
+/// buffers cover the event blocks.
 struct RiskSetPass {
     /// Coefficients that `risk_set_pass` used to compute the other fields.
     beta: Vec<f64>,
-    /// Scaled risk `weight_i * exp(eta_i - running_max_eta[i])` for each sample.
-    scaled_risk: Vec<f64>,
-    /// Running maximum of `eta + ln(weight)` over samples `0..=i`.
-    running_max_eta: Vec<f64>,
-    blocks: Vec<EventBlock>,
+    /// Per-sample risk buffer: `weight_i * exp(eta_i - m_i)` after `risk_set_pass` (where `m_i`
+    /// is the running maximum in `sample_scratch`), then normalized in `cox_quantities` by the
+    /// risk-set sum of the first event block whose risk set contains sample `i`.
+    risk: Vec<f64>,
+    /// Reused per-sample buffer: running max of `eta + ln(weight)` over `0..=i` after
+    /// `risk_set_pass`, Gram weights after normalization in `cox_quantities`, and hat values
+    /// (`x_i @ I^-1 @ x_i'`) in `firth_correction`.
+    sample_scratch: Vec<f64>,
+    /// Reused per-event-block buffer: scaled risk-set sum `S0[e]` after `risk_set_pass`, then
+    /// overwritten in `cox_quantities` with the carry ratio `S0[e] / S0[e + 1]` (`0.0` for the
+    /// last block).
+    block_scratch: Vec<f64>,
+    /// Unscaled log risk-set sum `running_max + ln(S0)` for each event block.
+    log_s0: Vec<f64>,
     /// Risk-weighted covariate means at each event block, row-major `(n_event_blocks, k)`.
     x_bar: Vec<f64>,
     log_likelihood: f64,
     score: Vec<f64>,
 }
 
-impl RiskSetPass {
-    /// Ratio of the risk-set sums of event blocks `e` and `e + 1`.
-    fn carry(&self, e: usize) -> f64 {
-        let (block, next) = (&self.blocks[e], &self.blocks[e + 1]);
-        let (max, next_max) = (
-            self.running_max_eta[block.end - 1],
-            self.running_max_eta[next.end - 1],
-        );
-        let ratio = block.s0 / next.s0;
-        if max < next_max {
-            ratio * (max - next_max).exp()
-        } else {
-            ratio
-        }
-    }
-
-    /// Factor that converts the sums over samples `0..i` from the scale of `running_max_eta[i - 1]`
-    /// to the scale of `running_max_eta[i]`. The factor is 1.0 at `i = 0`.
-    fn rescale(&self, i: usize) -> f64 {
-        if i > 0 && self.running_max_eta[i] > self.running_max_eta[i - 1] {
-            (self.running_max_eta[i - 1] - self.running_max_eta[i]).exp()
-        } else {
-            1.0
-        }
-    }
-}
-
-/// Scratch for likelihood evaluations.
-///
-/// Evaluations reuse the per-block buffers and the matrix chunks. Each evaluation allocates new
-/// per-sample buffers.
+/// Reusable scratch buffers for Cox likelihood evaluations.
 struct CoxWorkspace {
     matrix_scratch: MatrixScratch,
     pass: RiskSetPass,
-    /// Risk of each sample divided by the risk-set sum of the first event block whose risk set
-    /// contains the sample.
-    normalized_risk: Vec<f64>,
-    /// Gram weights per sample.
-    weights: Vec<f64>,
-    cumulative_weight: Vec<f64>,
-    event_weights: Vec<f64>,
     firth: FirthWorkspace,
     rank_checked: bool,
 }
@@ -1335,7 +1331,6 @@ impl<'a> CoxObjective<'a> {
 }
 
 struct FirthWorkspace {
-    hat: Vec<f64>,
     h_bar: Vec<f64>,
     /// `x_bar @ fisher_inverse` for one chunk of event blocks.
     transformed: Vec<f64>,
@@ -1347,19 +1342,15 @@ impl CoxWorkspace {
             matrix_scratch: MatrixScratch::default(),
             pass: RiskSetPass {
                 beta: Vec::new(),
-                scaled_risk: Vec::new(),
-                running_max_eta: Vec::new(),
-                blocks: Vec::new(),
+                risk: Vec::new(),
+                sample_scratch: Vec::new(),
+                block_scratch: Vec::new(),
+                log_s0: Vec::new(),
                 x_bar: Vec::new(),
                 log_likelihood: 0.0,
                 score: vec![0.0; k],
             },
-            normalized_risk: Vec::new(),
-            weights: Vec::new(),
-            cumulative_weight: Vec::new(),
-            event_weights: Vec::new(),
             firth: FirthWorkspace {
-                hat: Vec::new(),
                 h_bar: Vec::new(),
                 transformed: Vec::new(),
             },
@@ -1371,23 +1362,31 @@ impl CoxWorkspace {
 /// Computes the partial log-likelihood, score, and risk-set summaries.
 #[expect(clippy::too_many_lines)]
 fn risk_set_pass(data: &CoxPrecomputed, inputs: &CaseInputs, beta: &[f64], pass: &mut RiskSetPass) {
-    let n = data.n_samples();
     let k = data.n_features();
+    let rows = inputs.risk_set_rows();
+    let n_event_blocks = inputs.n_event_blocks();
     let RiskSetPass {
         beta: pass_beta,
-        scaled_risk,
-        running_max_eta,
-        blocks,
+        risk,
+        sample_scratch,
+        block_scratch,
+        log_s0,
         x_bar,
         log_likelihood,
         score,
     } = pass;
     pass_beta.clear();
     pass_beta.extend_from_slice(beta);
-    *scaled_risk = vec![0.0; n];
-    *running_max_eta = vec![0.0; n];
-    let scaled_risk = scaled_risk.as_mut_slice();
-    let running_max_eta = running_max_eta.as_mut_slice();
+    risk.resize(rows, 0.0);
+    sample_scratch.resize(rows, 0.0);
+    block_scratch.resize(n_event_blocks, 0.0);
+    log_s0.resize(n_event_blocks, 0.0);
+    x_bar.resize(n_event_blocks * k, 0.0);
+    let scaled_risk = risk.as_mut_slice();
+    let running_max_eta = sample_scratch.as_mut_slice();
+    let block_s0 = block_scratch.as_mut_slice();
+    let log_s0 = log_s0.as_mut_slice();
+    let x_bar = x_bar.as_mut_slice();
     // With fewer than 16 features, a scalar dot product per row is faster than the matrix-vector
     // product `X @ beta`.
     let use_matvec = k >= 16;
@@ -1395,7 +1394,7 @@ fn risk_set_pass(data: &CoxPrecomputed, inputs: &CaseInputs, beta: &[f64], pass:
         matmul(
             ColMut::from_slice_mut(scaled_risk),
             Accum::Replace,
-            MatRef::from_row_major_slice(&data.x, n, k),
+            MatRef::from_row_major_slice(&data.x[..rows * k], rows, k),
             ColRef::from_slice(beta),
             1.0,
             Par::Seq,
@@ -1405,7 +1404,7 @@ fn risk_set_pass(data: &CoxPrecomputed, inputs: &CaseInputs, beta: &[f64], pass:
     // `eta_shift` applies the offsets and makes each risk `weight * exp(eta)`.
     let eta_shift = inputs.eta_shift.as_deref();
     let mut max_eta = f64::NEG_INFINITY;
-    for i in 0..n {
+    for i in 0..rows {
         if !use_matvec {
             scaled_risk[i] = data.row(i).iter().zip(beta).map(|(x, b)| x * b).sum();
         }
@@ -1421,14 +1420,6 @@ fn risk_set_pass(data: &CoxPrecomputed, inputs: &CaseInputs, beta: &[f64], pass:
     scaled_risk[..first].fill(0.0);
     exp_shifted(&mut scaled_risk[first..], &running_max_eta[first..]);
 
-    blocks.clear();
-    // Reserving the capacity once avoids reallocating `blocks` as it grows in a new workspace. The
-    // macOS allocator does not reuse the freed buffers. Without the reservation, the peak memory of
-    // Cox inference grows with the number of likelihood ratio tests and profile bounds.
-    blocks.reserve_exact(inputs.n_event_blocks);
-    x_bar.resize(inputs.n_event_blocks * k, 0.0);
-    let x_bar = x_bar.as_mut_slice();
-
     // `CaseInputs` contains the event totals of the score and the log-likelihood. The scan computes
     // only the risk-set terms.
     let mut log_likelihood_sum = CompensatedSum::default();
@@ -1441,17 +1432,19 @@ fn risk_set_pass(data: &CoxPrecomputed, inputs: &CaseInputs, beta: &[f64], pass:
             inputs,
             scaled_risk,
             running_max_eta,
-            blocks,
+            block_s0,
+            log_s0,
             x_bar,
             score,
             &mut log_likelihood_sum,
         ),
         {
+            let event_block_ends = inputs.event_block_ends.as_slice();
             let mut s0 = CompensatedSum::default();
             let mut s1 = vec![0.0; k];
 
-            let mut block = 0;
-            for i in 0..n {
+            let mut e = 0;
+            for i in 0..rows {
                 let row = data.row(i);
                 let risk = scaled_risk[i];
                 // Rescale the earlier sums when the running maximum changes.
@@ -1467,31 +1460,23 @@ fn risk_set_pass(data: &CoxPrecomputed, inputs: &CaseInputs, beta: &[f64], pass:
                     *s1 += x * risk;
                 }
 
-                if i + 1 != data.block_ends[block] {
+                if i + 1 != event_block_ends[e] {
                     continue;
                 }
-                let event_weight = inputs.event_weights[block];
-                block += 1;
-                if event_weight == 0.0 {
-                    continue;
-                }
+                let event_weight = inputs.event_block_weights[e];
                 let s0 = s0.total();
                 let s0_inv = 1.0 / s0;
                 // `x_bar` is the risk-weighted mean of the covariates over the risk set.
-                let means = &mut x_bar[blocks.len() * k..(blocks.len() + 1) * k];
+                let means = &mut x_bar[e * k..(e + 1) * k];
                 for ((mean, &s1), score) in means.iter_mut().zip(&s1).zip(score.iter_mut()) {
                     *mean = s1 * s0_inv;
                     *score -= event_weight * *mean;
                 }
                 // Add the running maximum back to undo the risk-set scaling.
-                let log_s0 = running_max_eta[i] + s0.ln();
-                log_likelihood_sum.add(-event_weight * log_s0);
-                blocks.push(EventBlock {
-                    end: i + 1,
-                    event_weight,
-                    s0,
-                    log_s0,
-                });
+                log_s0[e] = running_max_eta[i] + s0.ln();
+                log_likelihood_sum.add(-event_weight * log_s0[e]);
+                block_s0[e] = s0;
+                e += 1;
             }
         },
     );
@@ -1513,18 +1498,20 @@ fn scan_rows<S: Simd, const K: usize>(
     inputs: &CaseInputs,
     scaled_risk: &[f64],
     running_max_eta: &[f64],
-    blocks: &mut Vec<EventBlock>,
+    block_s0: &mut [f64],
+    log_s0: &mut [f64],
     x_bar: &mut [f64],
     score: &mut [f64],
     log_likelihood_sum: &mut CompensatedSum,
 ) {
-    let (rows, _) = data.x.as_chunks::<K>();
+    let event_block_ends = inputs.event_block_ends.as_slice();
+    let (rows, _) = data.x[..inputs.risk_set_rows() * K].as_chunks::<K>();
     let (means, _) = x_bar.as_chunks_mut::<K>();
     let mut score_sums = [0.0; K];
     score_sums.copy_from_slice(score);
     let mut s0 = CompensatedSum::default();
     let mut s1 = [0.0; K];
-    let mut block = 0;
+    let mut e = 0;
     for (i, row) in rows.iter().enumerate() {
         let risk = scaled_risk[i];
         // Rescale the earlier sums when the running maximum changes.
@@ -1539,31 +1526,23 @@ fn scan_rows<S: Simd, const K: usize>(
         for j in 0..K {
             s1[j] += row[j] * risk;
         }
-        if i + 1 != data.block_ends[block] {
+        if i + 1 != event_block_ends[e] {
             continue;
         }
-        let event_weight = inputs.event_weights[block];
-        block += 1;
-        if event_weight == 0.0 {
-            continue;
-        }
+        let event_weight = inputs.event_block_weights[e];
         let s0 = s0.total();
         let s0_inv = 1.0 / s0;
         // `x_bar` is the risk-weighted mean of the covariates over the risk set.
-        let mean = &mut means[blocks.len()];
+        let mean = &mut means[e];
         for j in 0..K {
             mean[j] = s1[j] * s0_inv;
             score_sums[j] -= event_weight * mean[j];
         }
         // Add the running maximum back to undo the risk-set scaling.
-        let log_s0 = running_max_eta[i] + s0.ln();
-        log_likelihood_sum.add(-event_weight * log_s0);
-        blocks.push(EventBlock {
-            end: i + 1,
-            event_weight,
-            s0,
-            log_s0,
-        });
+        log_s0[e] = running_max_eta[i] + s0.ln();
+        log_likelihood_sum.add(-event_weight * log_s0[e]);
+        block_s0[e] = s0;
+        e += 1;
     }
     score.copy_from_slice(&score_sums);
 }
@@ -1602,52 +1581,56 @@ fn for_each_transformed_mean(
     }
 }
 
-/// Runs the reverse pass of `firth_correction` for `K` features.
+/// Runs the reverse pass of `firth_correction` for `K` features, with row-major
+/// `(n_event_blocks, K)` risk-set means in `x_bar`.
 #[inline(always)]
 #[expect(clippy::too_many_arguments)]
 fn reverse_rows<S: Simd, const K: usize>(
     simd: S,
     data: &CoxPrecomputed,
-    pass: &RiskSetPass,
-    x_bar: MatRef<f64>,
+    inputs: &CaseInputs,
+    x_bar: &[f64],
+    carry: &[f64],
     fisher_inverse: &Mat<f64>,
     chunk_rows: usize,
     hat: &[f64],
     h_bar: &[f64],
-    weights: &[f64],
     normalized_risk: &[f64],
     transformed: &mut Vec<f64>,
     correction: &mut [f64],
 ) {
     let (rows, _) = data.x.as_chunks::<K>();
-    let (means, _) = pass.x_bar.as_chunks::<K>();
-    let n_blocks = pass.blocks.len();
+    let (means, _) = x_bar.as_chunks::<K>();
+    let ends = inputs.event_block_ends.as_slice();
+    let event_weight = inputs.event_block_weights.as_slice();
     // `cumulative` is the sum of `event_weight[f] * S0[e] / S0[f] * x_bar[f] @ fisher_inverse` over
-    // the blocks `f >= e`. `S0[e]` is the risk-set sum of block `e`.
+    // the blocks `f >= e`, and `cumulative_weight` is the sum of `event_weight[f] * S0[e] / S0[f]`.
+    // `S0[e]` is the risk-set sum of block `e`.
     let mut cumulative = [0.0; K];
+    let mut cumulative_weight = 0.0;
     let mut sums = [0.0; K];
     for_each_transformed_mean(
-        x_bar,
+        MatRef::from_row_major_slice(x_bar, inputs.n_event_blocks(), K),
         fisher_inverse,
         chunk_rows,
         transformed,
         |e, transformed_e| {
-            let block = &pass.blocks[e];
-            let carry = if e + 1 < n_blocks { pass.carry(e) } else { 0.0 };
             for j in 0..K {
-                cumulative[j] = block.event_weight * transformed_e[j] + carry * cumulative[j];
+                cumulative[j] = event_weight[e] * transformed_e[j] + carry[e] * cumulative[j];
             }
-            let start = if e == 0 { 0 } else { pass.blocks[e - 1].end };
-            for i in (start..block.end).rev() {
+            cumulative_weight = event_weight[e] + carry[e] * cumulative_weight;
+            let start = if e == 0 { 0 } else { ends[e - 1] };
+            for i in (start..ends[e]).rev() {
                 let row = &rows[i];
                 let form = dot(simd, row, &cumulative);
-                let residual = weights[i] * hat[i] - 2.0 * normalized_risk[i] * form;
+                let weight = normalized_risk[i] * cumulative_weight;
+                let residual = weight * hat[i] - 2.0 * normalized_risk[i] * form;
                 for j in 0..K {
                     sums[j] += residual * row[j];
                 }
             }
             let mean_form = dot(simd, &means[e], transformed_e);
-            let block_residual = block.event_weight * (h_bar[e] - 2.0 * mean_form);
+            let block_residual = event_weight[e] * (h_bar[e] - 2.0 * mean_form);
             for j in 0..K {
                 sums[j] -= block_residual * means[e][j];
             }
@@ -1803,7 +1786,8 @@ mod tests {
             let (inputs, weight, offset) = fixture_inputs(&data, weighted);
             let mut workspace = CoxWorkspace::new(k);
             cox_quantities(&data, &inputs, 0.5, &beta, &mut workspace).unwrap();
-            let (unique_times, log_cumulative_hazard) = baseline_hazard(&data, &workspace.pass);
+            let (unique_times, log_cumulative_hazard) =
+                baseline_hazard(&data, &inputs, &workspace.pass);
 
             let eta: Vec<f64> = (0..data.n_samples())
                 .map(|i| {
@@ -2117,7 +2101,8 @@ mod tests {
 
         let mut workspace = CoxWorkspace::new(2);
         cox_quantities(&data, &inputs, 0.0, &[0.0, 0.0], &mut workspace).unwrap();
-        let (unique_times, log_cumulative_hazard) = baseline_hazard(&data, &workspace.pass);
+        let (unique_times, log_cumulative_hazard) =
+            baseline_hazard(&data, &inputs, &workspace.pass);
 
         assert_eq!(unique_times, vec![2.0, 3.0, 5.0]);
         let expected = [
