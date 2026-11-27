@@ -669,13 +669,17 @@ impl DesignCheck<'_> {
     }
 }
 
-/// Buffers reused across likelihood evaluations of one design.
+/// Reusable scratch buffers for evaluating one design. `eta` and `residual` are sized to a
+/// single evaluation block (`EVALUATION_BLOCK`), while `variance`, `y_minus_p`, and `h` have
+/// one entry per row.
 struct LogisticWorkspace {
     matrix_scratch: MatrixScratch,
     eta: Vec<f64>,
     /// `p * (1 - p)` for each row, where `p` is the fitted probability.
     variance: Vec<f64>,
     y_minus_p: Vec<f64>,
+    /// Per-row working weights (`sample_weight * p * (1 - p)`). Left empty for unit-weight fits
+    /// unless an evaluation takes the QR fallback or builds `J_S` over all rows.
     weights: Vec<f64>,
     h: Vec<f64>,
     residual: Vec<f64>,
@@ -688,15 +692,20 @@ struct LogisticWorkspace {
 }
 
 impl LogisticWorkspace {
-    fn new(n: usize) -> Self {
+    fn new(n: usize, unit_weights: bool) -> Self {
+        let block_rows = n.min(EVALUATION_BLOCK);
         Self {
             matrix_scratch: MatrixScratch::default(),
-            eta: vec![0.0; n],
+            eta: vec![0.0; block_rows],
             variance: vec![0.0; n],
             y_minus_p: vec![0.0; n],
-            weights: vec![0.0; n],
+            weights: if unit_weights {
+                Vec::new()
+            } else {
+                vec![0.0; n]
+            },
             h: vec![0.0; n],
-            residual: vec![0.0; n],
+            residual: vec![0.0; block_rows],
             augmented_rows: Vec::new(),
             gathered_design: Vec::new(),
             augmentation_weights: Vec::new(),
@@ -728,11 +737,12 @@ impl<'a> LogisticObjective<'a> {
         penalty_weight: f64,
         design_checked: &'a AtomicBool,
     ) -> Self {
+        let unit_weights = sample_weight.iter().all(|&weight| weight == 1.0);
         Self {
             design,
             response,
             sample_weight,
-            unit_weights: sample_weight.iter().all(|&weight| weight == 1.0),
+            unit_weights,
             offset,
             penalty_weight,
             design_check: DesignCheck {
@@ -740,7 +750,7 @@ impl<'a> LogisticObjective<'a> {
                 error: None,
             },
             evaluated: false,
-            workspace: LogisticWorkspace::new(design.nrows()),
+            workspace: LogisticWorkspace::new(design.nrows(), unit_weights),
         }
     }
 
@@ -766,14 +776,9 @@ impl<'a> LogisticObjective<'a> {
 
         // Each loop below reads every block of the design more than once. The later reads come from
         // cache.
-        let block_rows = if cfg!(accelerate) {
-            ACCELERATE_EVALUATION_BLOCK
-        } else {
-            EVALUATION_BLOCK
-        };
         let blocks = (0..n)
-            .step_by(block_rows)
-            .map(|start| start..n.min(start + block_rows));
+            .step_by(EVALUATION_BLOCK)
+            .map(|start| start..n.min(start + EVALUATION_BLOCK));
 
         // I = X.T @ diag(w) @ X, with w = sample_weight * p * (1 - p). An unpenalized fit also adds
         // `X.T @ (sample_weight * (y - p))` to the score in this loop.
@@ -782,11 +787,15 @@ impl<'a> LogisticObjective<'a> {
         let mut log_likelihood = CompensatedSum::default();
         let mut modified_score = vec![0.0; k];
         for rows in blocks.clone() {
-            let x_block = design.subrows(rows.start, rows.len());
+            // `rows.end - rows.start` is how the compiler computes the length of `v[rows]`, so it can
+            // see that `eta` and the other slices of the block have equal lengths and check their
+            // bounds once. It cannot see that through `rows.len()`.
+            let block_len = rows.end - rows.start;
+            let x_block = design.subrows(rows.start, block_len);
             // `eta` is `X @ beta` without the offset. `expit_loglik` adds the offset.
-            mul_vec(x_block, beta, &mut eta[rows.clone()]);
+            mul_vec(x_block, beta, &mut eta[..block_len]);
             log_likelihood.add(expit_loglik(
-                &eta[rows.clone()],
+                &eta[..block_len],
                 &offset[rows.clone()],
                 &sample_weight[rows.clone()],
                 self.unit_weights,
@@ -809,7 +818,7 @@ impl<'a> LogisticObjective<'a> {
             };
             add_weighted_gram(information.as_mut(), x_block, w, matrix_scratch);
             if unpenalized {
-                let residual = &mut residual[rows.clone()];
+                let residual = &mut residual[..block_len];
                 let (sample_weight, y_minus_p) = (&sample_weight[rows.clone()], &y_minus_p[rows]);
                 for ((r_i, &s_i), &d_i) in residual.iter_mut().zip(sample_weight).zip(y_minus_p) {
                     *r_i = s_i * d_i;
@@ -851,7 +860,8 @@ impl<'a> LogisticObjective<'a> {
             Ok(cholesky) if cholesky.minimum_relative_pivot > cholesky_tolerance => {
                 let mut augmented_count = 0;
                 for rows in blocks {
-                    let x_block = design.subrows(rows.start, rows.len());
+                    let block_len = rows.end - rows.start;
+                    let x_block = design.subrows(rows.start, block_len);
                     let h = &mut h[rows.clone()];
                     // The hat diagonal is
                     // `h_i = w_i * x_i @ inv_fisher @ x_i = w_i * |L^-1 x_i|^2`.
@@ -864,14 +874,14 @@ impl<'a> LogisticObjective<'a> {
                         augmentation_limit,
                     );
                     fill_residual(
-                        &mut residual[rows.clone()],
+                        &mut residual[..block_len],
                         &sample_weight[rows.clone()],
                         &response[rows.clone()],
                         &y_minus_p[rows.clone()],
                         h,
                         penalty_scale,
                     );
-                    add_transpose_mul_vec(x_block, &residual[rows], &mut modified_score);
+                    add_transpose_mul_vec(x_block, &residual[..block_len], &mut modified_score);
                 }
                 (cholesky.log_determinant, augmented_count)
             },
@@ -882,15 +892,18 @@ impl<'a> LogisticObjective<'a> {
                 // matrix `J`.
                 augmentation_limit = 0.0;
                 let log_determinant = pivoted_qr_hat_logdet(&weighted_design, h)?;
+                // Reuse `weights` for the full-length residual: `weighted_design` already consumed
+                // the Fisher weights, and the `all_rows` branch below overwrites `weights` anyway.
+                weights.resize(n, 0.0);
                 fill_residual(
-                    residual,
+                    weights,
                     sample_weight,
                     response,
                     y_minus_p,
                     h,
                     penalty_scale,
                 );
-                add_transpose_mul_vec(design.as_ref(), residual, &mut modified_score);
+                add_transpose_mul_vec(design.as_ref(), weights, &mut modified_score);
                 (log_determinant, n)
             },
             Err(error) => return Err(error),
@@ -904,6 +917,7 @@ impl<'a> LogisticObjective<'a> {
         // M5 and an i5-12500, this one came closest to always taking the faster path.
         let all_rows = augmented_count * 2 > n;
         if all_rows {
+            weights.resize(n, 0.0);
             dispatch!(Level::new(), _ => {
                 // Borrowing slices keeps this loop vectorized.
                 let (variance, h, weights) =
@@ -982,14 +996,10 @@ impl<'a> LogisticObjective<'a> {
     }
 }
 
-/// Rows per block in `LogisticObjective::evaluate` outside Accelerate builds. A block of 1024 rows
-/// and 50 features is 400 KB, which fits in a 512 KB L2 cache.
-const EVALUATION_BLOCK: usize = 1024;
-
-/// Rows per block in Accelerate builds. BLAS and vForce calls cost more per call than the faer
-/// loops, so these blocks are larger. On an M5, blocks of 8192 or 32768 rows made large fits slower
-/// than blocks of 16384 rows.
-const ACCELERATE_EVALUATION_BLOCK: usize = 16_384;
+/// Rows per block in `LogisticObjective::evaluate`. Outside Accelerate builds, a block of 1024
+/// rows and 50 features is 400 KB, which fits in a 512 KB L2 cache. BLAS and vForce calls have
+/// higher per-call overhead than the faer loops, so Accelerate builds use larger blocks.
+const EVALUATION_BLOCK: usize = if cfg!(accelerate) { 16_384 } else { 1024 };
 
 /// Fills `residual = sample_weight * (y - p) + penalty_scale * h * (0.5 - p)`. The loop computes
 /// `0.5 - p` as `(0.5 - y) + (y - p)`.
